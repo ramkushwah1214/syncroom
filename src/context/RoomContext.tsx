@@ -1,0 +1,873 @@
+
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Room, User, Track, QueueItem, AppView, ConnectionStatusType, ActivityItem } from '../types';
+import { socketService, SocketStatus } from '../services/socket';
+import { ServerMessage, PlaybackState } from '../../server/types';
+import { useToast } from './ToastContext';
+import { syncEngine } from '../audio/SyncEngine';
+import { audioEngine } from '../audio/AudioEngine';
+import { playbackManager } from '../audio/PlaybackProvider';
+import { spotifyPlaybackProvider } from '../audio/SpotifyPlaybackProvider';
+import { serverClock } from '../services/serverClock';
+import { saveSession, getSession, clearSession } from '../services/session';
+
+interface RoomContextType {
+  currentRoom: Room | null;
+  currentUser: User | null;
+  activeView: AppView;
+  setActiveView: (view: AppView) => void;
+  connectionStatus: ConnectionStatusType;
+  socketStatus: SocketStatus;
+  isLoading: boolean;
+  error: string | null;
+  createdRoomNotice: { room: Room; adminUser: User } | null;
+  clearCreatedRoomNotice: () => void;
+  createRoom: (name: string, adminName: string) => Promise<Room>;
+  joinRoom: (code: string, displayName: string) => Promise<Room>;
+  leaveRoom: () => void;
+  // Guarded server commands
+  playPause: () => void;
+  seek: (position: number) => void;
+  nextTrack: () => void;
+  previousTrack: () => void;
+  selectTrack: (trackId: string) => void;
+  addToQueue: (track: Track) => void;
+  importQueue: (tracks: Track[], replace?: boolean) => void;
+  removeFromQueue: (id: string) => void;
+  reorderQueue: (orderedIds: string[]) => void;
+  clearQueue: () => void;
+  playNow: (item: QueueItem) => void;
+  moveQueueUp: (index: number) => void;
+  moveQueueDown: (index: number) => void;
+  removeUser: (userId: string) => void;
+  renameRoom: (newName: string) => void;
+  endRoom: () => void;
+  activities: ActivityItem[];
+  loadActivities: () => void;
+  clearError: () => void;
+}
+
+const RoomContext = createContext<RoomContextType | undefined>(undefined);
+
+export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { showToast } = useToast();
+  const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [activeView, setActiveView] = useState<AppView>('landing');
+  const [socketStatus, setSocketStatus] = useState<SocketStatus>('disconnected');
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+  const [createdRoomNotice, setCreatedRoomNotice] = useState<{ room: Room; adminUser: User } | null>(null);
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+
+  // Pending room join / create promise resolvers
+  const pendingActionRef = useRef<{
+    resolve: (room: Room) => void;
+    reject: (err: Error) => void;
+  } | null>(null);
+
+  // Refs to track latest state values so useEffect handlers avoid stale closures
+  const currentRoomRef = useRef(currentRoom);
+  currentRoomRef.current = currentRoom;
+  const currentUserRef = useRef(currentUser);
+  currentUserRef.current = currentUser;
+  const showToastRef = useRef(showToast);
+  showToastRef.current = showToast;
+  const lastQueueVersionRef = useRef<number>(0);
+
+  // Real measured Connection Quality:
+  const [connectionQuality, setConnectionQuality] = useState<ConnectionStatusType>('connected');
+
+  useEffect(() => {
+    const updateQuality = () => {
+      const q = socketService.getConnectionQuality();
+      setConnectionQuality(q);
+    };
+
+    updateQuality();
+    const unsub = socketService.onStatusChange(updateQuality);
+    return () => {
+      unsub();
+    };
+  }, []);
+
+  // Initialize Spotify Playback Provider on mount
+  useEffect(() => {
+    spotifyPlaybackProvider.initialize().catch((err) => {
+      console.warn('[RoomContext] Spotify player init notice:', err);
+    });
+  }, []);
+
+  // Convert SocketStatus to UI ConnectionStatusType
+  const connectionStatus: ConnectionStatusType =
+    socketStatus === 'config_error'
+      ? 'config_error'
+      : socketStatus === 'disconnected'
+        ? 'offline'
+        : socketStatus === 'reconnecting'
+          ? 'reconnecting'
+          : connectionQuality;
+
+  // Real-time client tick interpolation when playing (paused when tab hidden for performance)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      setCurrentRoom((prev) => {
+        if (!prev || !prev.playerState.isPlaying || !prev.currentTrack) return prev;
+        const nextPos = prev.playerState.position + 1;
+        if (nextPos >= prev.currentTrack.duration) {
+          return prev; // Server authority handles track skip broadcast
+        }
+        return {
+          ...prev,
+          playerState: {
+            ...prev.playerState,
+            position: nextPos,
+          },
+        };
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Network and Background/Foreground lifecycle handling (Item 7 & 8)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleOnline = () => {
+      // Network returned: reconnect socket and restore room state
+      if (socketService.getStatus() !== 'connected') {
+        socketService.connect();
+      } else {
+        const stored = getSession();
+        if (stored && stored.sessionToken) {
+          socketService.send({
+            type: 'RECONNECT_SESSION',
+            sessionToken: stored.sessionToken,
+            sessionId: stored.sessionToken,
+          });
+        }
+      }
+    };
+
+    const handleOffline = () => {
+      // Device lost internet connection: socketService handles this authoritatively
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        // App returned to foreground / screen unlocked / PWA reopened
+        if (socketService.getStatus() !== 'connected') {
+          socketService.connect();
+        } else {
+          const stored = getSession();
+          if (stored && stored.sessionToken && currentRoomRef.current) {
+            socketService.send({
+              type: 'RECONNECT_SESSION',
+              sessionToken: stored.sessionToken,
+              sessionId: stored.sessionToken,
+            });
+          }
+        }
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  // Initialize socket and listen to messages
+  useEffect(() => {
+    socketService.connect();
+
+    const unsubStatus = socketService.onStatusChange((status) => {
+      setSocketStatus(status);
+
+      // Attempt reconnection whenever socket becomes connected (Item 7)
+      if (status === 'connected') {
+        const stored = getSession();
+        if (stored && stored.sessionToken) {
+          socketService.send({
+            type: 'RECONNECT_SESSION',
+            sessionToken: stored.sessionToken,
+            sessionId: stored.sessionToken,
+          });
+        }
+      }
+    });
+
+    const unsubMessages = socketService.onMessage((msg: ServerMessage) => {
+      switch (msg.type) {
+        case 'ROOM_CREATED': {
+          const token = msg.sessionToken || msg.sessionId;
+          saveSession({
+            sessionToken: token,
+            userId: msg.user.id,
+            roomId: msg.room.id,
+            roomCode: msg.room.code,
+            role: msg.user.role,
+            userName: msg.user.name,
+          });
+          lastQueueVersionRef.current = msg.room.queueVersion || 1;
+          setCurrentRoom(msg.room);
+          setCurrentUser(msg.user);
+          setCreatedRoomNotice({ room: msg.room, adminUser: msg.user });
+          setActiveView('room');
+
+          if (msg.room.playerState) {
+            syncEngine.handlePlaybackState(msg.room.playerState);
+          }
+
+          if (pendingActionRef.current) {
+            pendingActionRef.current.resolve(msg.room);
+            pendingActionRef.current = null;
+          }
+
+          showToastRef.current({
+            type: 'success',
+            title: 'Room Created!',
+            description: `Room code: ${msg.room.code}. You are the session Host.`,
+          });
+          break;
+        }
+
+        case 'ROOM_JOINED': {
+          const token = msg.sessionToken || msg.sessionId;
+          saveSession({
+            sessionToken: token,
+            userId: msg.user.id,
+            roomId: msg.room.id,
+            roomCode: msg.room.code,
+            role: msg.user.role,
+            userName: msg.user.name,
+          });
+          lastQueueVersionRef.current = msg.room.queueVersion || 1;
+          setCurrentRoom(msg.room);
+          setCurrentUser(msg.user);
+          setActiveView('room');
+
+          if (msg.room.playerState) {
+            syncEngine.handlePlaybackState(msg.room.playerState);
+          }
+
+          if (pendingActionRef.current) {
+            pendingActionRef.current.resolve(msg.room);
+            pendingActionRef.current = null;
+          }
+
+          showToastRef.current({
+            type: 'success',
+            title: `Joined ${msg.room.name}`,
+            description: `Connected as listener (${msg.room.code})`,
+          });
+          break;
+        }
+
+        case 'ROOM_STATE': {
+          const token = msg.sessionToken || msg.sessionId;
+          saveSession({
+            sessionToken: token,
+            userId: msg.user.id,
+            roomId: msg.room.id,
+            roomCode: msg.room.code,
+            role: msg.user.role,
+            userName: msg.user.name,
+          });
+          lastQueueVersionRef.current = msg.room.queueVersion || 1;
+          setCurrentRoom(msg.room);
+          setCurrentUser(msg.user);
+          setActiveView('room');
+          setIsLoading(false);
+
+          if (msg.room.playerState) {
+            syncEngine.handlePlaybackState(msg.room.playerState);
+          }
+
+          showToastRef.current({
+            type: 'info',
+            title: `Reconnected to ${msg.room.name}`,
+            description: `Session restored (${msg.user.role === 'admin' ? 'Host' : 'Listener'})`,
+          });
+          break;
+        }
+
+        case 'USER_JOINED': {
+          setCurrentRoom((prev) => {
+            if (!prev) return prev;
+            const existing = prev.users.some((u) => u.id === msg.user.id);
+            const nextUsers = existing
+              ? prev.users.map((u) => (u.id === msg.user.id ? msg.user : u))
+              : [...prev.users, msg.user];
+            return { ...prev, users: nextUsers };
+          });
+
+          showToastRef.current({
+            type: 'info',
+            title: 'Participant Joined',
+            description: `${msg.user.name} joined the room`,
+          });
+          break;
+        }
+
+        case 'USER_LEFT': {
+          setCurrentRoom((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              users: prev.users.filter((u) => u.id !== msg.userId),
+            };
+          });
+          break;
+        }
+
+        case 'USER_UPDATED': {
+          setCurrentRoom((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              users: prev.users.map((u) => (u.id === msg.user.id ? msg.user : u)),
+            };
+          });
+          break;
+        }
+
+        case 'PLAYBACK_CHANGED':
+        case 'PLAYBACK_STATE': {
+          let state: PlaybackState;
+          if ('state' in msg && msg.state) {
+            state = msg.state;
+          } else if (msg.type === 'PLAYBACK_STATE') {
+            const trackDur =
+              currentRoom?.queue.find((q) => q.track.id === msg.currentTrackId)?.track.duration ||
+              currentRoom?.currentTrack?.duration ||
+              0;
+            state = {
+              trackId: msg.currentTrackId !== undefined ? msg.currentTrackId : null,
+              isPlaying: !!msg.isPlaying,
+              position: msg.position ?? 0,
+              serverTimestamp: Date.now(),
+              startedAt: msg.startedAt ?? null,
+              startAt: null,
+              duration: trackDur,
+              version: 1,
+            };
+          } else {
+            break;
+          }
+
+          syncEngine.handlePlaybackState(state);
+
+          setCurrentRoom((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              playerState: {
+                ...prev.playerState,
+                ...state,
+              },
+            };
+          });
+          break;
+        }
+
+        case 'QUEUE_CHANGED':
+        case 'QUEUE_UPDATED': {
+          if (msg.queueVersion !== undefined) {
+            if (msg.queueVersion < lastQueueVersionRef.current) {
+              // Stale out-of-order queue update - reject!
+              break;
+            }
+            lastQueueVersionRef.current = msg.queueVersion;
+          }
+
+          setCurrentRoom((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              queue: msg.queue,
+              queueVersion: msg.queueVersion ?? prev.queueVersion,
+              currentTrack: msg.currentTrack !== undefined ? msg.currentTrack : prev.currentTrack,
+            };
+          });
+          break;
+        }
+
+        case 'ROOM_UPDATED': {
+          setCurrentRoom(msg.room);
+          showToastRef.current({
+            type: 'info',
+            title: 'Room Updated',
+            description: `Room updated to "${msg.room.name}"`,
+          });
+          break;
+        }
+
+        case 'ROOM_ENDED': {
+          syncEngine.stop();
+          clearSession();
+          setCurrentRoom(null);
+          setCurrentUser(null);
+          setActiveView('landing');
+          showToastRef.current({
+            type: 'info',
+            title: 'Room Ended',
+            description: msg.message || 'Room ended by the admin.',
+          });
+          break;
+        }
+
+        case 'USER_REMOVED': {
+          const latestUser = currentUserRef.current;
+          if (latestUser && msg.userId === latestUser.id) {
+            syncEngine.stop();
+            clearSession();
+            setCurrentRoom(null);
+            setCurrentUser(null);
+            setActiveView('landing');
+            showToastRef.current({
+              type: 'error',
+              title: 'Removed From Room',
+              description: msg.message || 'You were removed from this room by the admin.',
+            });
+          } else {
+            setCurrentRoom((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                users: prev.users.filter((u) => u.id !== msg.userId),
+              };
+            });
+          }
+          break;
+        }
+
+        case 'ACTIVITIES_LOADED': {
+          setActivities(msg.activities || []);
+          break;
+        }
+
+        case 'ERROR': {
+          setIsLoading(false);
+          setError(msg.message);
+
+          if (pendingActionRef.current) {
+            pendingActionRef.current.reject(new Error(msg.message));
+            pendingActionRef.current = null;
+          }
+
+          if (msg.code === 'SESSION_NOT_FOUND' || msg.code === 'INVALID_SESSION' || msg.code === 'USER_REMOVED') {
+            clearSession();
+          }
+
+          showToastRef.current({
+            type: 'error',
+            title:
+              msg.code === 'FORBIDDEN'
+                ? 'Access Denied'
+                : msg.code === 'RATE_LIMITED'
+                ? 'Slow Down'
+                : msg.code === 'DATABASE_NOT_CONFIGURED'
+                ? 'Database Not Configured'
+                : msg.code === 'DATABASE_ERROR'
+                ? 'Database Error'
+                : 'Error',
+            description: msg.message,
+          });
+          break;
+        }
+      }
+    });
+
+    const unsubError = socketService.onError((err) => {
+      setError(err.message);
+      showToastRef.current({
+        type: 'error',
+        title: err.code === 'INSECURE_WEBSOCKET_IN_PRODUCTION' ? 'Security Configuration Error' : 'Connection Error',
+        description: err.message,
+      });
+    });
+
+    setIsLoading(false);
+
+    return () => {
+      unsubStatus();
+      unsubMessages();
+      unsubError();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const clearError = useCallback(() => setError(null), []);
+
+  const createRoom = async (name: string, adminName: string): Promise<Room> => {
+    setError(null);
+
+    // Ensure socket is connected
+    if (socketService.getStatus() !== 'connected') {
+      await socketService.connect();
+    }
+
+    return new Promise((resolve, reject) => {
+      pendingActionRef.current = { resolve, reject };
+
+      const sent = socketService.send({
+        type: 'CREATE_ROOM',
+        name,
+        adminName,
+        device: typeof window !== 'undefined' && window.innerWidth < 768 ? 'mobile' : 'desktop',
+      });
+
+      if (!sent) {
+        pendingActionRef.current = null;
+        const err = new Error('WebSocket connection unavailable');
+        setError(err.message);
+        reject(err);
+      }
+    });
+  };
+
+  const joinRoom = async (code: string, displayName: string): Promise<Room> => {
+    setError(null);
+
+    if (socketService.getStatus() !== 'connected') {
+      await socketService.connect();
+    }
+
+    return new Promise((resolve, reject) => {
+      pendingActionRef.current = { resolve, reject };
+
+      const sent = socketService.send({
+        type: 'JOIN_ROOM',
+        code,
+        displayName,
+        device: typeof window !== 'undefined' && window.innerWidth < 768 ? 'mobile' : 'desktop',
+      });
+
+      if (!sent) {
+        pendingActionRef.current = null;
+        const err = new Error('WebSocket connection unavailable');
+        setError(err.message);
+        reject(err);
+      }
+    });
+  };
+
+  const leaveRoom = () => {
+    syncEngine.stop();
+    socketService.send({ type: 'LEAVE_ROOM' });
+    clearSession();
+
+    if (currentRoom) {
+      showToast({
+        type: 'info',
+        title: 'Left Room',
+        description: `Disconnected from ${currentRoom.name}`,
+      });
+    }
+
+    setCurrentRoom(null);
+    setCurrentUser(null);
+    setActiveView('landing');
+  };
+
+  // Authoritative Playback commands to server
+  const playPause = async () => {
+    if (!currentRoom) return;
+    const provider = playbackManager.getProvider();
+
+    // 0. Only ADMIN can control room playback
+    if (currentUser?.role !== 'admin') {
+      showToast({
+        type: 'error',
+        title: 'Admin Only',
+        description: 'Only the room host can control playback.',
+      });
+      return;
+    }
+
+    if (currentRoom.playerState.isPlaying) {
+      if (provider.id === 'spotify') {
+        provider.pause();
+      }
+      socketService.send({ type: 'ADMIN_PAUSE' });
+      return;
+    }
+
+    // 1. Track exists
+    const track = currentRoom.currentTrack;
+    if (!track) {
+      showToast({
+        type: 'error',
+        title: 'Cannot Play',
+        description: 'No track selected or queue is empty.',
+      });
+      return;
+    }
+
+    // 2. Track is supported by configured PlaybackProvider
+    const trackCheck = playbackManager.canPlayTrack(track);
+    if (!trackCheck.canPlay) {
+      showToast({
+        type: 'error',
+        title: 'Playback Unavailable',
+        description: trackCheck.reason,
+      });
+      return;
+    }
+
+    // 3. Playback provider is initialized & configured
+    if (!provider.isConfigured) {
+      if (
+        provider.id === 'spotify' &&
+        'waitForDevice' in provider &&
+        typeof (provider as any).waitForDevice === 'function' &&
+        (provider.getStatus() === 'CONNECTING_PLAYER' || provider.getStatus() === 'INITIALIZING')
+      ) {
+        await (provider as any).waitForDevice(3000);
+      }
+    }
+
+    if (!provider.isConfigured) {
+      const status = provider.getStatus();
+      let title = 'Playback Not Ready';
+      let description = provider.getErrorMessage?.() || 'Audio playback provider is not ready.';
+
+      if (status === 'CONNECT_SPOTIFY' || status === 'AUTH_REQUIRED') {
+        title = 'Spotify Connect Required';
+        description = 'Please connect your Spotify account to enable audio playback.';
+      } else if (status === 'PREMIUM_REQUIRED') {
+        title = 'Spotify Premium Required';
+        description = 'Spotify Web Playback SDK requires a Spotify Premium subscription to stream audio.';
+      } else if (status === 'CONNECTING_PLAYER' || status === 'INITIALIZING') {
+        title = 'Player Connecting';
+        description = 'Spotify web player is connecting. Please wait a moment.';
+      } else if (status === 'DEVICE_NOT_READY') {
+        title = 'Device Not Ready';
+        description = 'Spotify player device is still connecting. Please wait a moment.';
+      } else if (status === 'AUTOPLAY_BLOCKED') {
+        title = 'Autoplay Blocked';
+        description = 'Click Play to start Spotify audio.';
+      } else if (status === 'PROVIDER_UNAVAILABLE') {
+        title = 'Provider Unavailable';
+        description = 'Audio playback provider is not configured.';
+      }
+
+      showToast({
+        type: 'error',
+        title,
+        description,
+      });
+      return;
+    }
+
+    // 4. Audio resource is available
+    if (track.playbackStatus !== 'AVAILABLE') {
+      showToast({
+        type: 'error',
+        title: 'Audio Resource Unavailable',
+        description: track.restrictionReason
+          ? `Track restricted by Spotify (${track.restrictionReason}).`
+          : 'Audio resource is not available for this track.',
+      });
+      return;
+    }
+
+    // 5. If provider is Spotify, activate element and load track into the Web Playback SDK player
+    if (provider.id === 'spotify') {
+      try {
+        if ('activateElement' in provider && typeof (provider as any).activateElement === 'function') {
+          await (provider as any).activateElement();
+        }
+        await provider.loadTrack(track, currentRoom.playerState.position);
+      } catch (err: unknown) {
+        const msg = (err as Error)?.message || 'Failed to start Spotify playback';
+        showToast({
+          type: 'error',
+          title: 'Playback Error',
+          description: msg,
+        });
+        return;
+      }
+    } else {
+      // Browser allows playback for HTML audio
+      try {
+        await audioEngine.unlock();
+      } catch {
+        showToast({
+          type: 'error',
+          title: 'Browser Playback Restricted',
+          description: 'Click anywhere on the page to allow browser audio playback.',
+        });
+        return;
+      }
+    }
+
+    socketService.send({ type: 'ADMIN_PLAY' });
+  };
+
+  const seek = (position: number) => {
+    if (currentUser?.role !== 'admin') {
+      showToast({ type: 'error', title: 'Admin Only', description: 'Only the room host can seek playback.' });
+      return;
+    }
+    const provider = playbackManager.getProvider();
+    if (provider.id === 'spotify' && provider.isConfigured) {
+      provider.seek(position);
+    }
+    audioEngine.unlock().catch(() => {});
+    socketService.send({ type: 'ADMIN_SEEK', position });
+  };
+
+  const nextTrack = () => {
+    if (currentUser?.role !== 'admin') {
+      showToast({ type: 'error', title: 'Admin Only', description: 'Only the room host can skip tracks.' });
+      return;
+    }
+    audioEngine.unlock().catch(() => {});
+    socketService.send({ type: 'ADMIN_NEXT' });
+  };
+
+  const previousTrack = () => {
+    if (currentUser?.role !== 'admin') {
+      showToast({ type: 'error', title: 'Admin Only', description: 'Only the room host can restart tracks.' });
+      return;
+    }
+    audioEngine.unlock().catch(() => {});
+    socketService.send({ type: 'ADMIN_PREVIOUS' });
+  };
+
+  const selectTrack = (trackId: string) => {
+    if (currentUser?.role !== 'admin') {
+      showToast({ type: 'error', title: 'Admin Only', description: 'Only the room host can select tracks.' });
+      return;
+    }
+    audioEngine.unlock().catch(() => {});
+    socketService.send({ type: 'ADMIN_SELECT_TRACK', trackId });
+  };
+
+  const addToQueue = (track: Track) => {
+    socketService.send({ type: 'ADMIN_ADD_QUEUE', track });
+  };
+
+  const importQueue = (tracks: Track[], replace = false) => {
+    socketService.send({ type: 'ADMIN_IMPORT_QUEUE', tracks, replace });
+  };
+
+  const removeFromQueue = (queueItemId: string) => {
+    socketService.send({ type: 'ADMIN_REMOVE_QUEUE', queueItemId });
+  };
+
+  const reorderQueue = (orderedIds: string[]) => {
+    socketService.send({ type: 'ADMIN_REORDER_QUEUE', queueItemIds: orderedIds });
+  };
+
+  const clearQueue = () => {
+    socketService.send({ type: 'ADMIN_CLEAR_QUEUE' });
+  };
+
+  const playNow = (item: QueueItem) => {
+    const playCheck = playbackManager.canPlayTrack(item.track);
+    if (!playCheck.canPlay) {
+      showToast({
+        type: 'info',
+        title: 'Metadata Selected',
+        description: playCheck.reason,
+      });
+    }
+    selectTrack(item.track.id);
+  };
+
+  const moveQueueUp = (index: number) => {
+    if (!currentRoom || index <= 0 || index >= currentRoom.queue.length) return;
+    const ids = currentRoom.queue.map((q) => q.id);
+    const temp = ids[index];
+    ids[index] = ids[index - 1];
+    ids[index - 1] = temp;
+    reorderQueue(ids);
+  };
+
+  const moveQueueDown = (index: number) => {
+    if (!currentRoom || index < 0 || index >= currentRoom.queue.length - 1) return;
+    const ids = currentRoom.queue.map((q) => q.id);
+    const temp = ids[index];
+    ids[index] = ids[index + 1];
+    ids[index + 1] = temp;
+    reorderQueue(ids);
+  };
+
+  const removeUser = (userId: string) => {
+    socketService.send({ type: 'ADMIN_REMOVE_USER', userId });
+  };
+
+  const renameRoom = (newName: string) => {
+    socketService.send({ type: 'ADMIN_RENAME_ROOM', newName });
+  };
+
+  const endRoom = () => {
+    socketService.send({ type: 'ADMIN_END_ROOM' });
+  };
+
+  const loadActivities = () => {
+    socketService.send({ type: 'GET_ACTIVITIES' });
+  };
+
+  const clearCreatedRoomNotice = useCallback(() => {
+    setCreatedRoomNotice(null);
+  }, []);
+
+  return (
+    <RoomContext.Provider
+      value={{
+        currentRoom,
+        currentUser,
+        activeView,
+        setActiveView,
+        connectionStatus,
+        socketStatus,
+        isLoading,
+        error,
+        createdRoomNotice,
+        clearCreatedRoomNotice,
+        createRoom,
+        joinRoom,
+        leaveRoom,
+        playPause,
+        seek,
+        nextTrack,
+        previousTrack,
+        selectTrack,
+        addToQueue,
+        importQueue,
+        removeFromQueue,
+        reorderQueue,
+        clearQueue,
+        playNow,
+        moveQueueUp,
+        moveQueueDown,
+        removeUser,
+        renameRoom,
+        endRoom,
+        activities,
+        loadActivities,
+        clearError,
+      }}
+    >
+      {children}
+    </RoomContext.Provider>
+  );
+};
+
+export function useRoom() {
+  const context = useContext(RoomContext);
+  if (!context) {
+    throw new Error('useRoom must be used within a RoomProvider');
+  }
+  return context;
+}
