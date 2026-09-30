@@ -82,6 +82,10 @@ export class SpotifyMusicProvider implements MusicProvider {
 
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) {
+      return [];
+    }
+
     const res = await fetch(
       `${baseUrl}/api/spotify/search?q=${encodeURIComponent(trimmed)}&sessionId=${encodeURIComponent(sessionId)}`,
       {
@@ -111,6 +115,9 @@ export class SpotifyMusicProvider implements MusicProvider {
   }> {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) {
+      return { configured: false, connected: false };
+    }
     try {
       const res = await fetch(`${baseUrl}/api/spotify/status?sessionId=${encodeURIComponent(sessionId)}`, {
         headers: { 'x-session-id': sessionId },
@@ -135,6 +142,9 @@ export class SpotifyMusicProvider implements MusicProvider {
   }> {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) {
+      return { configured: false, url: null, message: 'Backend connection not configured. Please set VITE_API_URL.' };
+    }
     const res = await fetch(`${baseUrl}/api/spotify/login?format=json&sessionId=${encodeURIComponent(sessionId)}`, {
       headers: {
         Accept: 'application/json',
@@ -150,6 +160,7 @@ export class SpotifyMusicProvider implements MusicProvider {
   public async logout(): Promise<void> {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) return;
     await fetch(`${baseUrl}/api/spotify/logout`, {
       method: 'POST',
       headers: {
@@ -166,6 +177,7 @@ export class SpotifyMusicProvider implements MusicProvider {
   public async getMyPlaylists(): Promise<UserPlaylistSummary[]> {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) return [];
     try {
       const res = await fetch(`${baseUrl}/api/spotify/me/playlists?sessionId=${encodeURIComponent(sessionId)}`, {
         headers: { 'x-session-id': sessionId },
@@ -189,6 +201,7 @@ export class SpotifyMusicProvider implements MusicProvider {
   } | null> {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) return null;
     try {
       const res = await fetch(`${baseUrl}/api/spotify/token?sessionId=${encodeURIComponent(sessionId)}`, {
         headers: { 'x-session-id': sessionId },
@@ -206,6 +219,7 @@ export class SpotifyMusicProvider implements MusicProvider {
   public async playTrack(deviceId: string, uris: string[], positionMs = 0): Promise<boolean> {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
+    if (!baseUrl) return false;
     const res = await fetch(`${baseUrl}/api/spotify/playback/play`, {
       method: 'PUT',
       headers: {

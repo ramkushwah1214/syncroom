@@ -166,6 +166,14 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
     const sessionId = this.getSessionId();
     const baseUrl = getApiBaseUrl();
 
+    if (!baseUrl) {
+      this.logDiagnostic('Access token available', false);
+      this.status = 'PROVIDER_UNAVAILABLE';
+      this.errorMessage = 'Backend connection not configured. Please configure VITE_API_URL.';
+      this.notifyListeners();
+      return null;
+    }
+
     try {
       const res = await fetch(`${baseUrl}/api/spotify/token?sessionId=${encodeURIComponent(sessionId)}`, {
         headers: { 'x-session-id': sessionId },

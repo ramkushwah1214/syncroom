@@ -23,6 +23,12 @@ export default defineConfig(({ command }) => {
             fs.copyFileSync(distIndex, dist404);
             console.log('[Vite Build] Created dist/404.html for GitHub Pages SPA fallback.');
           }
+          const iconsSrc = path.resolve(distDir, 'icons');
+          const assetsIcons = path.resolve(distDir, 'assets', 'icons');
+          if (fs.existsSync(iconsSrc)) {
+            fs.cpSync(iconsSrc, assetsIcons, { recursive: true, force: true });
+            console.log('[Vite Build] Copied dist/icons into dist/assets/icons for manifest resolution.');
+          }
           if (fs.existsSync(distDir)) {
             fs.cpSync(distDir, docsDir, { recursive: true, force: true });
             console.log('[Vite Build] Synced dist/ into docs/ for GitHub Pages /docs fallback.');
