@@ -43,8 +43,8 @@ jobs:
         run: npm run build:client
         env:
           VITE_BASE: /syncroom/
-          VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL || '' }}
-          VITE_WS_URL: ${{ vars.VITE_WS_URL || secrets.VITE_WS_URL || '' }}
+          VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL || 'https://syncroom-gupn.onrender.com' }}
+          VITE_WS_URL: ${{ vars.VITE_WS_URL || secrets.VITE_WS_URL || 'wss://syncroom-gupn.onrender.com/ws' }}
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
