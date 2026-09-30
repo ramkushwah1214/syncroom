@@ -13,14 +13,19 @@ export default defineConfig(({ command }) => {
       react(),
       tailwindcss(),
       {
-        name: 'copy-404-html',
+        name: 'copy-404-and-sync-docs',
         closeBundle() {
           const distDir = path.resolve(import.meta.dirname, 'dist');
           const distIndex = path.resolve(distDir, 'index.html');
           const dist404 = path.resolve(distDir, '404.html');
+          const docsDir = path.resolve(import.meta.dirname, 'docs');
           if (fs.existsSync(distIndex)) {
             fs.copyFileSync(distIndex, dist404);
             console.log('[Vite Build] Created dist/404.html for GitHub Pages SPA fallback.');
+          }
+          if (fs.existsSync(distDir)) {
+            fs.cpSync(distDir, docsDir, { recursive: true, force: true });
+            console.log('[Vite Build] Synced dist/ into docs/ for GitHub Pages /docs fallback.');
           }
         },
       },

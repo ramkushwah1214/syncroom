@@ -13,15 +13,19 @@
  * - WebSocket connections (ws:, wss:)
  */
 
-const CACHE_NAME = 'syncroom-static-v1';
+const CACHE_NAME = 'syncroom-static-v2';
+const BASE_PATH = self.location.pathname.replace(/\/sw\.js$/, '') || '';
 
 const STATIC_SHELL = [
-  '/',
+  `${BASE_PATH}/`,
+  `${BASE_PATH}/index.html`,
+  `${BASE_PATH}/manifest.webmanifest`,
+  `${BASE_PATH}/icons/icon-192.svg`,
+  `${BASE_PATH}/icons/icon-512.svg`,
+  `${BASE_PATH}/icons/icon-maskable.svg`,
+  // Canonical root assets
   '/index.html',
   '/manifest.webmanifest',
-  '/icons/icon-192.svg',
-  '/icons/icon-512.svg',
-  '/icons/icon-maskable.svg',
 ];
 
 self.addEventListener('install', (event) => {
@@ -79,12 +83,12 @@ self.addEventListener('fetch', (event) => {
     return; // Pass through directly to network
   }
 
-  // For SPA page navigations: Network First, fallback to cached /index.html if offline
+  // For SPA page navigations: Network First, fallback to cached shell if offline
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request).catch(() => {
-        return caches.match('/index.html').then((cached) => {
-          return cached || caches.match('/');
+        return caches.match(`${BASE_PATH}/`).then((cached) => {
+          return cached || caches.match(`${BASE_PATH}/index.html`);
         });
       })
     );
@@ -94,12 +98,12 @@ self.addEventListener('fetch', (event) => {
   // For static immutable build assets (Vite hashed bundles /assets/*, fonts, icons)
   if (
     url.origin === self.location.origin &&
-    (url.pathname.startsWith('/assets/') ||
-      url.pathname.startsWith('/icons/') ||
+    (url.pathname.startsWith(`${BASE_PATH}/assets/`) ||
+      url.pathname.startsWith(`${BASE_PATH}/icons/`) ||
       url.pathname.endsWith('.svg') ||
       url.pathname.endsWith('.png') ||
       url.pathname.endsWith('.woff2') ||
-      url.pathname === '/manifest.webmanifest')
+      url.pathname === `${BASE_PATH}/manifest.webmanifest`)
   ) {
     event.respondWith(
       caches.match(request).then((cachedResponse) => {
