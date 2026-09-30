@@ -3,12 +3,13 @@
 # ==============================================================================
 
 # Stage 1: Build Frontend and Backend
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies
+# Install build dependencies (copy prisma schema first so postinstall prisma generate succeeds)
 COPY package*.json ./
+COPY prisma ./prisma
 RUN npm ci --legacy-peer-deps
 
 # Copy application sources
@@ -19,7 +20,7 @@ RUN npx prisma generate && npm run build
 
 # ==============================================================================
 # Stage 2: Minimal Production Runtime
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 
@@ -28,6 +29,7 @@ ENV PORT=3000
 
 # Install production-only dependencies
 COPY package*.json ./
+COPY prisma ./prisma
 RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 
 # Copy compiled bundles and prisma from builder stage
