@@ -85,8 +85,8 @@ export function getRuntimeConfig(): RuntimeConfig {
     if (isLocalhost) {
       resolvedApiUrl = window.location.origin;
     } else if (isGitHubPages) {
-      // On GitHub Pages, NEVER default to GitHub Pages origin: GitHub Pages has no backend APIs
-      resolvedApiUrl = '';
+      // Connect to the real production backend deployed on Render
+      resolvedApiUrl = 'https://syncroom-gupn.onrender.com';
     } else {
       // Co-located production deployments (e.g. Docker container, VPS, full-stack host)
       resolvedApiUrl = window.location.origin;
@@ -123,8 +123,7 @@ export function getRuntimeConfig(): RuntimeConfig {
         const protocol = isHttps ? 'wss:' : 'ws:';
         resolvedWsUrl = `${protocol}//${window.location.host}/ws`;
       } else if (isGitHubPages) {
-        // DO NOT derive wss://ramkushwah1214.github.io/ws
-        resolvedWsUrl = '';
+        resolvedWsUrl = 'wss://syncroom-gupn.onrender.com/ws';
       } else {
         const protocol = isHttps ? 'wss:' : 'ws:';
         resolvedWsUrl = `${protocol}//${window.location.host}/ws`;
