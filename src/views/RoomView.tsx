@@ -10,9 +10,11 @@ import { RoomInviteModal } from '../components/RoomInviteModal';
 import { RoomSettingsModal } from '../components/RoomSettingsModal';
 import { AdminMobileSheet } from '../components/AdminMobileSheet';
 import { MyPlaylistsModal } from '../components/MyPlaylistsModal';
-import { ListMusic, Users, UserPlus, Sparkles, VolumeX, Sliders } from 'lucide-react';
+import { ListMusic, Users, UserPlus, Sparkles, VolumeX, Sliders, Radio } from 'lucide-react';
 import { syncEngine } from '../audio/SyncEngine';
 import { SyncStatus } from '../audio/types';
+import { playbackManager, SpotifyPlayerStatus } from '../audio/PlaybackProvider';
+import { openSpotifyLoginPopup } from '../services/music/SpotifyMusicProvider';
 
 interface RoomViewProps {
   room: Room;
@@ -72,12 +74,24 @@ export const RoomView: React.FC<RoomViewProps> = ({
   const [repeatMode, setRepeatMode] = useState<'off' | 'all' | 'one'>('off');
   const [realDriftMs, setRealDriftMs] = useState<number>(0);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(syncEngine.getSyncStatus());
+  const [providerStatus, setProviderStatus] = useState<SpotifyPlayerStatus | string>(
+    playbackManager.getStatus()
+  );
 
   useEffect(() => {
-    return syncEngine.onSyncStatusChange((st) => {
+    const unsubSync = syncEngine.onSyncStatusChange((st) => {
       setSyncStatus(st);
       setRealDriftMs(st.driftMs);
     });
+
+    const unsubProvider = playbackManager.onProviderChange((_, st) => {
+      setProviderStatus(st);
+    });
+
+    return () => {
+      unsubSync();
+      unsubProvider();
+    };
   }, []);
 
   const users = room.users || [];
@@ -99,13 +113,13 @@ export const RoomView: React.FC<RoomViewProps> = ({
   return (
     <div className="min-h-screen bg-[#08080a] text-neutral-100 flex flex-col selection:bg-amber-400/20 selection:text-amber-200">
       {/* Autoplay Restriction Unblock Banner */}
-      {syncStatus.status === 'autoplay_blocked' && (
+      {(syncStatus.status === 'autoplay_blocked' || providerStatus === 'AUTOPLAY_BLOCKED') && (
         <div className="bg-amber-500/15 border-b border-amber-500/30 px-4 py-2.5 flex items-center justify-between z-30 sticky top-0 backdrop-blur-md">
           <div className="flex items-center gap-3">
             <VolumeX className="w-5 h-5 text-amber-400 animate-pulse shrink-0" />
             <div>
               <p className="text-sm font-medium text-amber-200">Browser blocked audio autoplay</p>
-              <p className="text-xs text-amber-300/80">Click to start listening in sync with everyone</p>
+              <p className="text-xs text-amber-300/80">Tap Enable Audio to start listening in sync with everyone</p>
             </div>
           </div>
           <button
@@ -113,7 +127,29 @@ export const RoomView: React.FC<RoomViewProps> = ({
             onClick={() => syncEngine.unlockAutoplay()}
             className="px-4 py-1.5 rounded-lg bg-amber-400 text-neutral-950 font-semibold text-xs hover:bg-amber-300 transition-colors shadow-md shadow-amber-400/20"
           >
-            Enable Audio
+            Tap to Enable Audio
+          </button>
+        </div>
+      )}
+
+      {/* Member Spotify Not Connected Prompt Banner */}
+      {(providerStatus === 'CONNECT_SPOTIFY' || providerStatus === 'AUTH_REQUIRED') && (
+        <div className="bg-emerald-500/15 border-b border-emerald-500/30 px-4 py-2.5 flex items-center justify-between z-30 sticky top-0 backdrop-blur-md">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Radio className="w-4 h-4 text-emerald-400 shrink-0 animate-pulse" />
+            <div className="flex flex-col text-left min-w-0">
+              <span className="font-semibold text-emerald-200 text-xs">Connect Spotify to enable audio</span>
+              <span className="text-[11px] text-emerald-300/80 truncate">
+                Each listener browser requires its own authenticated Spotify account to play music.
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={openSpotifyLoginPopup}
+            className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs transition-colors shrink-0 ml-3 shadow-md shadow-emerald-500/20"
+          >
+            Connect Spotify
           </button>
         </div>
       )}
@@ -125,6 +161,8 @@ export const RoomView: React.FC<RoomViewProps> = ({
         role={currentRole}
         participantCount={onlineCount}
         connectionStatus={connectionStatus}
+        spotifyStatus={providerStatus}
+        onConnectSpotify={openSpotifyLoginPopup}
         driftMs={realDriftMs}
         onLeaveRoom={onLeaveRoom}
         onToggleRole={onToggleRole}

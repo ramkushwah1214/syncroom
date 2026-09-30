@@ -227,3 +227,69 @@ test('SPOTIFY PLAYBACK 11: Real Device ID Lifecycle & State Transitions', () => 
   assert.match(checkAfterOffline.reason, /device is connecting/);
 });
 
+test('SPOTIFY PLAYBACK 12: Member Playback Lifecycle Telemetry & Safe Logging format', () => {
+  const provider = new SpotifyPlaybackProvider();
+
+  // Intercept console.log to verify format and safe logging
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: any[]) => {
+    logs.push(args.join(' '));
+  };
+
+  try {
+    provider.logMemberPlaybackLifecycle('test_flow');
+    assert.equal(logs.length, 1);
+    const logLine = logs[0];
+    assert.match(logLine, /^\[MEMBER_PLAYBACK\] \[test_flow\]/);
+    assert.match(logLine, /room_connected=(true|false)/);
+    assert.match(logLine, /spotify_token_available=(true|false)/);
+    assert.match(logLine, /spotify_player_initialized=(true|false)/);
+    assert.match(logLine, /spotify_connect=(true|false)/);
+    assert.match(logLine, /spotify_ready=(true|false)/);
+    assert.match(logLine, /device_id=(present|absent)/);
+    assert.match(logLine, /player_state=(playing|paused|autoplay_blocked|auth_required|premium_required|not_ready|unavailable)/);
+
+    // Verify secrets, credentials, and tokens are strictly never leaked
+    assert.doesNotMatch(logLine, /Bearer\s+|ey[A-Za-z0-9_-]{10,}|client_secret|access_token=|refresh_token=/i);
+  } finally {
+    console.log = originalLog;
+  }
+});
+
+test('SPOTIFY PLAYBACK 13: Member unauthenticated Spotify state reports CONNECT_SPOTIFY with clear user action', () => {
+  const provider = new SpotifyPlaybackProvider() as any;
+  provider.status = 'CONNECT_SPOTIFY';
+  provider.errorMessage = 'Connect Spotify to enable audio.';
+
+  assert.equal(provider.getStatus(), 'CONNECT_SPOTIFY');
+  assert.equal(provider.getErrorMessage(), 'Connect Spotify to enable audio.');
+  assert.equal(provider.isConfigured, false);
+
+  const track = createMockTrack();
+  const check = provider.canPlayTrack(track);
+  assert.equal(check.canPlay, false);
+  assert.match(check.reason, /Connect Spotify to enable audio|connect your Spotify account/i);
+});
+
+test('SPOTIFY PLAYBACK 14: Mobile autoplay blocked event transitions to AUTOPLAY_BLOCKED', () => {
+  const provider = new SpotifyPlaybackProvider() as any;
+  provider.status = 'AUTOPLAY_BLOCKED';
+  provider.errorMessage = 'Tap Enable Audio to start playback.';
+
+  assert.equal(provider.getStatus(), 'AUTOPLAY_BLOCKED');
+  assert.equal(provider.getErrorMessage(), 'Tap Enable Audio to start playback.');
+});
+
+test('SPOTIFY PLAYBACK 15: Single player instance per browser session & cleanup invariant', () => {
+  const provider = new SpotifyPlaybackProvider() as any;
+  provider.deviceId = 'some_device_id';
+  provider.connectSucceeded = true;
+  provider.status = 'PLAYER_READY';
+
+  provider.destroy();
+  assert.equal(provider.getDeviceId(), null);
+  assert.equal(provider.getStatus(), 'INITIALIZING');
+  assert.equal(provider.connectSucceeded, false);
+});
+

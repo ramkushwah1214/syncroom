@@ -233,3 +233,18 @@ export class SpotifyMusicProvider implements MusicProvider {
 }
 
 export const spotifyMusicProvider = new SpotifyMusicProvider();
+
+/**
+ * Opens popup for Spotify OAuth authentication for the current browser session.
+ */
+export async function openSpotifyLoginPopup(): Promise<Window | null> {
+  try {
+    const auth = await spotifyMusicProvider.getAuthUrl();
+    if (auth.url) {
+      return window.open(auth.url, 'spotify_oauth', 'width=600,height=720,status=no,toolbar=no,menubar=no');
+    }
+  } catch (err) {
+    console.error('[Spotify] Failed to open OAuth login popup:', err);
+  }
+  return null;
+}

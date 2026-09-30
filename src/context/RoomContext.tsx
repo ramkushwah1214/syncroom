@@ -255,6 +255,12 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setCurrentUser(msg.user);
           setActiveView('room');
 
+          // Trace member playback lifecycle and verify Spotify session
+          spotifyPlaybackProvider.logMemberPlaybackLifecycle('ROOM_JOINED');
+          spotifyPlaybackProvider.initialize().catch((err) => {
+            console.warn('[RoomContext] Member Spotify init notice:', err);
+          });
+
           if (msg.room.playerState) {
             syncEngine.handlePlaybackState(msg.room.playerState);
           }
@@ -287,6 +293,12 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setCurrentUser(msg.user);
           setActiveView('room');
           setIsLoading(false);
+
+          // Trace member playback lifecycle and verify Spotify session
+          spotifyPlaybackProvider.logMemberPlaybackLifecycle('ROOM_STATE');
+          spotifyPlaybackProvider.initialize().catch((err) => {
+            console.warn('[RoomContext] Member Spotify init notice:', err);
+          });
 
           if (msg.room.playerState) {
             syncEngine.handlePlaybackState(msg.room.playerState);

@@ -107,8 +107,8 @@ export const MusicPlayer: React.FC<MusicPlayerProps> = ({
         style={{ backgroundColor: track.coverGradient?.accent || '#f59e0b' }}
       />
 
-      {/* Autoplay restriction prompt for admin */}
-      {!isUnlocked && isAdmin && (
+      {/* Autoplay restriction prompt for all listeners */}
+      {(!isUnlocked || providerStatus === 'AUTOPLAY_BLOCKED') && (
         <div className="w-full mb-3 z-20">
           <button
             type="button"
@@ -117,7 +117,7 @@ export const MusicPlayer: React.FC<MusicPlayerProps> = ({
           >
             <div className="flex items-center gap-2">
               <VolumeX className="w-4 h-4 text-amber-400 animate-pulse shrink-0" />
-              <span className="font-semibold">Click to enable synchronized audio</span>
+              <span className="font-semibold">Tap to Enable Audio</span>
             </div>
             <span className="text-[11px] font-mono underline decoration-amber-400/50 group-hover:decoration-amber-300">
               Enable audio
@@ -134,8 +134,8 @@ export const MusicPlayer: React.FC<MusicPlayerProps> = ({
               <div className="flex items-center gap-2.5 min-w-0">
                 <Radio className="w-4 h-4 text-emerald-400 shrink-0 animate-pulse" />
                 <div className="flex flex-col text-left">
-                  <span className="font-semibold text-emerald-100">Connect Spotify Account</span>
-                  <span className="text-[11px] text-emerald-300/80">Connect Spotify to stream audio via official Web Playback SDK.</span>
+                  <span className="font-semibold text-emerald-100">Connect Spotify to enable audio</span>
+                  <span className="text-[11px] text-emerald-300/80">Connect your Spotify Premium account so this device can stream synchronized audio.</span>
                 </div>
               </div>
               <button
@@ -194,14 +194,14 @@ export const MusicPlayer: React.FC<MusicPlayerProps> = ({
             <div className="w-full mb-3 z-20 p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs flex items-center justify-between">
               <div className="flex items-center gap-2 min-w-0">
                 <VolumeX className="w-4 h-4 text-amber-400 shrink-0" />
-                <span className="truncate">Browser audio blocked. Click Play to start Spotify audio.</span>
+                <span className="truncate">Browser audio blocked. Tap Enable Audio to start playback.</span>
               </div>
               <button
                 type="button"
                 onClick={enableAudio}
-                className="px-2.5 py-1 rounded-md bg-amber-400 hover:bg-amber-300 text-neutral-950 font-medium text-[11px] shrink-0 ml-2"
+                className="px-2.5 py-1 rounded-md bg-amber-400 hover:bg-amber-300 text-neutral-950 font-semibold text-[11px] shrink-0 ml-2"
               >
-                Enable
+                Tap to Enable Audio
               </button>
             </div>
           )}

@@ -12,6 +12,7 @@ export class SyncEngine {
   private audio: AudioEngine;
   private audioSource: TrackAudioSource;
   private currentPlaybackState: PlaybackState | null = null;
+  private pendingPlaybackState: PlaybackState | null = null;
   private lastVersion: number = 0;
   private scheduledPlayTimer: number | null = null;
   private driftCheckTimer: number | null = null;
@@ -42,12 +43,23 @@ export class SyncEngine {
     this.setupVisibilityListeners();
 
     playbackManager.onProviderChange((provider, status) => {
+      if (status === 'AUTOPLAY_BLOCKED') {
+        this.updateSyncStatus({ status: 'autoplay_blocked' });
+      }
+
       if (
         provider.id === 'spotify' &&
         status === 'PLAYER_READY' &&
-        this.currentPlaybackState?.isPlaying
+        (this.pendingPlaybackState || this.currentPlaybackState?.isPlaying)
       ) {
-        this.handlePlaybackState(this.currentPlaybackState, true);
+        const stateToReconcile = this.pendingPlaybackState || this.currentPlaybackState;
+        this.pendingPlaybackState = null;
+        if (stateToReconcile) {
+          console.log(
+            `[SYNC] event=reconcile_playback_on_ready track=${stateToReconcile.trackId || 'none'} isPlaying=${stateToReconcile.isPlaying}`
+          );
+          this.handlePlaybackState(stateToReconcile, true);
+        }
       }
     });
   }
@@ -206,6 +218,11 @@ export class SyncEngine {
 
       if (!provider.isConfigured) {
         // Provider is still initializing, connecting, or waiting for device ready
+        // Retain playback state so it can be reconciled as soon as Spotify player is ready
+        this.pendingPlaybackState = state;
+        console.log(
+          `[SYNC] event=playback_state_retained_pending_ready track=${state.trackId || 'none'} isPlaying=${state.isPlaying}`
+        );
         this.updateSyncStatus({ status: 'buffering', driftSeconds: 0, driftMs: 0, playbackRate: 1.0 });
         return;
       }
@@ -503,17 +520,25 @@ export class SyncEngine {
    * User interaction trigger to unlock audio playback when browser blocks autoplay.
    */
   public async unlockAutoplay(): Promise<void> {
+    try {
+      await playbackManager.activateElement();
+    } catch (err) {
+      console.warn('[SyncEngine] activateElement error:', err);
+    }
+
     const provider = playbackManager.getProvider();
-    if (provider.id === 'spotify' && provider.isConfigured) {
-      if ('activateElement' in provider && typeof (provider as any).activateElement === 'function') {
-        await (provider as any).activateElement();
+    if (provider.id === 'spotify') {
+      if (provider.isConfigured) {
+        await provider.play().catch(() => {});
       }
-      await provider.play().catch(() => {});
     } else {
       await this.audio.unlock();
     }
-    if (this.currentPlaybackState && this.currentPlaybackState.isPlaying) {
-      await this.handlePlaybackState(this.currentPlaybackState, true);
+
+    const stateToReconcile = this.pendingPlaybackState || this.currentPlaybackState;
+    if (stateToReconcile && stateToReconcile.isPlaying) {
+      this.pendingPlaybackState = null;
+      await this.handlePlaybackState(stateToReconcile, true);
     }
   }
 

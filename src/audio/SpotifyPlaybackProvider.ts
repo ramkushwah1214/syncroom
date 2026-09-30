@@ -2,6 +2,7 @@ import { Track } from '../types';
 import { playbackManager, PlaybackProvider, SpotifyPlayerStatus } from './PlaybackProvider';
 import { getApiBaseUrl } from '../config/runtime';
 import { getSession } from '../services/session';
+import { socketService } from '../services/socket';
 
 declare global {
   interface Window {
@@ -99,6 +100,7 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
   private tokenInFlight: Promise<string | null> | null = null;
   private transferredDeviceId: string | null = null;
   private transferPromise: Promise<void> | null = null;
+  private connectSucceeded: boolean = false;
 
   public get isConfigured(): boolean {
     return (
@@ -183,8 +185,9 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       if (!res.ok) {
         this.logDiagnostic('Access token expired', true);
         if (res.status === 401) {
-          this.status = 'AUTH_REQUIRED';
-          this.errorMessage = 'Spotify authentication required. Connect your account.';
+          this.status = 'CONNECT_SPOTIFY';
+          this.errorMessage = 'Connect Spotify to enable audio.';
+          this.logMemberPlaybackLifecycle('token_fetch_unauthenticated');
           this.notifyListeners();
         }
         return null;
@@ -215,6 +218,34 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       return;
     }
     console.log(`[Spotify Playback Diagnostics] ${key}:`, value);
+  }
+
+  /**
+   * Safe structured lifecycle event logger for Member & Host Playback sessions.
+   * Strictly verifies and logs:
+   * room_connected, spotify_token_available, spotify_player_initialized,
+   * spotify_connect, spotify_ready, device_id, player_state.
+   * NEVER logs access tokens, refresh tokens, secrets, or authorization headers.
+   */
+  public logMemberPlaybackLifecycle(eventContext?: string): void {
+    const isSocketConnected = typeof window !== 'undefined' && socketService ? socketService.getStatus() === 'connected' : false;
+    const tokenAvailable = Boolean(this.cachedToken && Date.now() < this.tokenExpiresAt);
+    const playerInitialized = Boolean(this.player);
+    const connectStatus = this.connectSucceeded ? 'true' : 'false';
+    const isReady = Boolean(this.deviceId && (this.status === 'PLAYER_READY' || this.status === 'PLAYING' || this.status === 'PAUSED'));
+    const deviceIdState = this.deviceId ? 'present' : 'absent';
+    const playerState =
+      this.status === 'PLAYING' ? 'playing' :
+      this.status === 'PAUSED' ? 'paused' :
+      this.status === 'AUTOPLAY_BLOCKED' ? 'autoplay_blocked' :
+      this.status === 'AUTH_REQUIRED' || this.status === 'CONNECT_SPOTIFY' ? 'auth_required' :
+      this.status === 'PREMIUM_REQUIRED' ? 'premium_required' :
+      this.status === 'DEVICE_NOT_READY' ? 'not_ready' :
+      'unavailable';
+
+    console.log(
+      `[MEMBER_PLAYBACK]${eventContext ? ` [${eventContext}]` : ''} room_connected=${isSocketConnected} spotify_token_available=${tokenAvailable} spotify_player_initialized=${playerInitialized} spotify_connect=${connectStatus} spotify_ready=${isReady} device_id=${deviceIdState} player_state=${playerState}`
+    );
   }
 
   /**
@@ -341,7 +372,8 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
     if (!token) {
       this.logDiagnostic('Access token available', false);
       this.status = 'CONNECT_SPOTIFY';
-      this.errorMessage = 'Please connect your Spotify account to enable playback.';
+      this.errorMessage = 'Connect Spotify to enable audio.';
+      this.logMemberPlaybackLifecycle('initialize_no_token');
       this.notifyListeners();
       return false;
     }
@@ -352,7 +384,8 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
     if (!this.isPremium) {
       this.logDiagnostic('account_error message', 'Spotify Premium is required for Web Playback.');
       this.status = 'PREMIUM_REQUIRED';
-      this.errorMessage = 'Spotify Premium is required for Web Playback.';
+      this.errorMessage = 'Spotify Premium is required for Web Playback SDK audio streaming.';
+      this.logMemberPlaybackLifecycle('account_error_non_premium');
       this.notifyListeners();
       return false;
     }
@@ -380,23 +413,28 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
           this.fetchFreshToken().then((freshToken) => {
             if (freshToken) {
               this.logDiagnostic('Access token available', true);
+              this.logMemberPlaybackLifecycle('token_refresh_success');
               cb(freshToken);
             } else {
               this.logDiagnostic('Access token available', false);
+              this.logMemberPlaybackLifecycle('token_refresh_failed');
               cb(''); // Pass empty string to trigger auth error rather than hanging SDK
             }
           }).catch((err) => {
             this.logDiagnostic('Access token fetch error', (err as Error)?.message);
+            this.logMemberPlaybackLifecycle('token_refresh_error');
             cb('');
           });
         },
         volume: this.volume,
       });
       this.logDiagnostic('Spotify.Player created', true);
+      this.logMemberPlaybackLifecycle('player_created');
     } catch (err: unknown) {
       this.logDiagnostic('Spotify.Player created', false);
       this.status = 'PLAYBACK_ERROR';
       this.errorMessage = (err as Error)?.message || 'Failed to instantiate Spotify Player.';
+      this.logMemberPlaybackLifecycle('player_creation_failed');
       this.notifyListeners();
       return false;
     }
@@ -408,7 +446,8 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       this.errorMessage = null;
       this.logDiagnostic('ready event received', true);
       this.logDiagnostic('device_id available', true);
-      console.log(`[Spotify Playback Provider] Real device ready: ${device_id}`);
+      console.log(`[Spotify Playback Provider] Event: ready. Real device ready: ${device_id}`);
+      this.logMemberPlaybackLifecycle('ready');
       this.notifyListeners();
 
       // Automatically transfer playback to this web player device so Spotify recognizes it
@@ -421,12 +460,13 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
 
     this.player.addListener('not_ready', ({ device_id }) => {
       this.logDiagnostic('not_ready event received', true);
-      console.warn(`[Spotify Playback Provider] Device went offline: ${device_id}`);
+      console.warn(`[Spotify Playback Provider] Event: not_ready. Device went offline: ${device_id}`);
       if (this.deviceId === device_id) {
         this.deviceId = null;
       }
       this.status = 'DEVICE_NOT_READY';
       this.errorMessage = 'Spotify playback device went offline.';
+      this.logMemberPlaybackLifecycle('not_ready');
       this.notifyListeners();
       this.scheduleReconnect();
     });
@@ -437,17 +477,22 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       if (!state) return;
 
       console.log(
+        `[MEMBER_PLAYBACK_STATE] track=${state.track_window?.current_track?.id || 'none'} position=${state.position} duration=${state.duration} paused=${state.paused} position_timestamp=${Date.now()}`
+      );
+      console.log(
         `[SYNC] event=local_spotify_state track=${state.track_window?.current_track?.id || 'none'} paused=${state.paused} posMs=${state.position}`
       );
 
       if (state.paused) {
         if (this.status === 'PLAYING') {
           this.status = 'PAUSED';
+          this.logMemberPlaybackLifecycle('player_state_paused');
           this.notifyListeners();
         }
       } else {
         if (this.status !== 'PLAYING') {
           this.status = 'PLAYING';
+          this.logMemberPlaybackLifecycle('player_state_playing');
           this.notifyListeners();
         }
       }
@@ -455,32 +500,36 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
 
     this.player.addListener('initialization_error', ({ message }) => {
       this.logDiagnostic('initialization_error message', message);
-      console.error('[Spotify Playback Provider] initialization_error:', message);
+      console.error('[Spotify Playback Provider] Event: initialization_error:', message);
       this.status = 'PLAYBACK_ERROR';
       this.errorMessage = `Initialization failed: ${message}. Web Playback requires EME/DRM browser support.`;
+      this.logMemberPlaybackLifecycle('initialization_error');
       this.notifyListeners();
     });
 
     this.player.addListener('authentication_error', ({ message }) => {
       this.logDiagnostic('authentication_error message', message);
-      console.error('[Spotify Playback Provider] authentication_error:', message);
+      console.error('[Spotify Playback Provider] Event: authentication_error:', message);
+      this.cachedToken = null;
       this.status = 'AUTH_REQUIRED';
-      this.errorMessage = `Authentication failed: ${message}. Please reconnect Spotify.`;
+      this.errorMessage = `Authentication failed: ${message}. Connect Spotify to enable audio.`;
+      this.logMemberPlaybackLifecycle('authentication_error');
       this.notifyListeners();
     });
 
     this.player.addListener('account_error', ({ message }) => {
       this.logDiagnostic('account_error message', message);
-      console.error('[Spotify Playback Provider] account_error (Premium required):', message);
+      console.error('[Spotify Playback Provider] Event: account_error (Premium required):', message);
       this.status = 'PREMIUM_REQUIRED';
-      this.errorMessage = 'Spotify Premium is required for Web Playback.';
+      this.errorMessage = 'Spotify Premium is required for Web Playback SDK audio streaming.';
+      this.logMemberPlaybackLifecycle('account_error');
       this.notifyListeners();
     });
 
     this.player.addListener('playback_error', ({ message }) => {
       const msg = String(message || '');
       this.logDiagnostic('playback_error message', msg);
-      console.warn('[Spotify Playback Provider] playback_error:', msg);
+      console.error('[Spotify Playback Provider] Event: playback_error:', msg);
       if (/no list was loaded/i.test(msg)) {
         // Transient SDK error caused when seek or resume is invoked before Spotify's dealer buffers the audio
         // If we know the current track ID and aren't already playing, trigger a Web API load to recover smoothly
@@ -491,23 +540,28 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       }
       this.status = 'PLAYBACK_ERROR';
       this.errorMessage = `Playback error: ${msg}`;
+      this.logMemberPlaybackLifecycle('playback_error');
       this.notifyListeners();
     });
 
     this.player.addListener('autoplay_failed', () => {
       this.logDiagnostic('autoplay_failed', true);
-      console.warn('[Spotify Playback Provider] autoplay_failed');
+      console.warn('[Spotify Playback Provider] Event: autoplay_failed. Browser autoplay blocked.');
       this.status = 'AUTOPLAY_BLOCKED';
-      this.errorMessage = 'Browser autoplay blocked. Click Play to start Spotify audio.';
+      this.errorMessage = 'Tap Enable Audio to start playback.';
+      this.logMemberPlaybackLifecycle('autoplay_failed');
       this.notifyListeners();
     });
 
     // 7. Connect player to Spotify
     this.status = 'CONNECTING_PLAYER';
     this.notifyListeners();
+    this.logMemberPlaybackLifecycle('player_connect_start');
 
     const connected = await this.player.connect();
+    this.connectSucceeded = Boolean(connected);
     this.logDiagnostic('player.connect() result', connected);
+    this.logMemberPlaybackLifecycle('player_connect_result');
 
     if (!connected) {
       this.status = 'PLAYBACK_ERROR';
@@ -973,6 +1027,7 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       this.player = null;
     }
     this.deviceId = null;
+    this.connectSucceeded = false;
     this.status = 'INITIALIZING';
     this.statusListeners.clear();
   }
