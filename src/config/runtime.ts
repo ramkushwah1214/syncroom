@@ -34,7 +34,7 @@ export function validateWebSocketUrl(url: string, isProduction: boolean, isHttps
   if ((isProduction || isHttps) && !isLocalhost && url.startsWith('ws://')) {
     return {
       isValid: false,
-      error: `Security Violation: SyncRoom detected a production HTTPS environment but an insecure WebSocket URL was configured (${url}). Production WebSockets must strictly use wss://.`,
+      error: `Security Violation: SyncRoom detected an insecure WebSocket connection (ws://) in a production environment. Secure WebSockets (wss://) are strictly required.`,
     };
   }
 
@@ -112,8 +112,8 @@ export function getRuntimeConfig(): RuntimeConfig {
 
   if (!resolvedWsUrl) {
     if (resolvedApiUrl) {
-      // Automatically derive wss:// / ws:// endpoint from configured backend API URL
-      const wsProtocol = resolvedApiUrl.startsWith('https:') ? 'wss:' : 'ws:';
+      // Automatically derive wss:// endpoint from configured backend API URL in production/HTTPS
+      const wsProtocol = (!isLocalhost && (isProduction || isHttps)) || resolvedApiUrl.startsWith('https:') ? 'wss:' : 'ws:';
       const cleanHost = resolvedApiUrl
         .replace(/^https?:\/\//, '')
         .replace(/\/.*$/, '');
