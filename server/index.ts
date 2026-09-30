@@ -7,6 +7,7 @@ import { setupWebSocketServer } from './websocket/connection';
 import { spotifyRouter } from './spotify/spotifyRoutes';
 import { playlistRouter, handleLoadPlaylistIntoRoomQueue } from './playlists/playlistRoutes';
 import { userRouter } from './auth/userRoutes';
+import { roomRouter } from './rooms/roomRoutes';
 import { corsMiddleware } from './utils/cors';
 import { securityHeadersMiddleware } from './utils/securityHeaders';
 import { requestLogger, logger } from './utils/logger';
@@ -151,6 +152,9 @@ export async function startServer() {
 
   // Mount User Identity API
   app.use('/api/user', userRouter);
+
+  // Mount Room Creation & Metadata API
+  app.use('/api/rooms', roomRouter);
 
   // Mount Custom SyncRoom Playlists API (Feature 2)
   app.use('/api/playlists', playlistRouter);

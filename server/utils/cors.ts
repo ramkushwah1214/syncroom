@@ -57,8 +57,9 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction) 
       );
       res.setHeader(
         'Access-Control-Allow-Headers',
-        'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Session-Id, X-Correlation-Id',
+        'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Session-Id, X-Session-Token, X-User-Id, X-User-Token, X-Device-Id, X-Correlation-Id',
       );
+      res.setHeader('Access-Control-Max-Age', '86400');
     } else if (isProduction) {
       // In production, unauthorized origins are strictly blocked for cross-origin preflight requests
       if (req.method === 'OPTIONS') {
@@ -68,6 +69,7 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction) 
   }
 
   if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Max-Age', '86400');
     return res.status(204).end();
   }
 

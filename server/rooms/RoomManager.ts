@@ -4,6 +4,8 @@ import { ServerUser, SessionData, ServerMessage, ActivityItem } from '../types';
 import { generateRoomCode, normalizeRoomCode } from '../../src/utils/roomCode';
 import { dbRepository, generateSessionToken } from '../db/dbRepository';
 import { canRemoveMember, canManageRoom } from '../auth/permissions';
+import { logger } from '../utils/logger';
+import { performance } from 'perf_hooks';
 
 export class RoomManager {
   private roomsById: Map<string, Room> = new Map();
@@ -211,16 +213,19 @@ export class RoomManager {
   public async createRoom(
     name: string,
     adminName: string,
-    ws: WebSocket,
+    ws?: WebSocket,
     device?: 'desktop' | 'mobile' | 'tablet' | 'speaker',
   ): Promise<{ room: Room; user: ServerUser; sessionId: string; sessionToken: string }> {
+    const tStart = performance.now();
     const roomId = `room_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const adminId = `user_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const code = this.generateUniqueRoomCode();
 
     let sessionToken = generateSessionToken();
 
-    // 1. Persist to PostgreSQL database (Mandatory in Phase 9)
+    logger.info(`[ROOM_CREATE] db_connect_start roomId=${roomId} code=${code}`);
+
+    // 1. Persist to PostgreSQL database atomically
     const dbRes = await dbRepository.createRoom({
       roomId,
       code,
@@ -231,12 +236,14 @@ export class RoomManager {
     });
     sessionToken = dbRes.sessionToken;
 
+    logger.info(`[ROOM_CREATE] db_connected dbDurationMs=${dbRes.durationMs}`);
+
     const adminUser: ServerUser = {
       id: adminId,
       name: adminName.trim() || 'Admin',
       role: 'admin', // Server strictly assigns admin role
       roomId,
-      connected: true,
+      connected: Boolean(ws),
       lastSeen: Date.now(),
       sessionId: sessionToken,
       device: device || 'desktop',
@@ -261,18 +268,18 @@ export class RoomManager {
       lastSeen: Date.now(),
     });
 
-    this.registerConnection(ws, adminId, sessionToken, roomId);
+    if (ws) {
+      this.registerConnection(ws, adminId, sessionToken, roomId);
+    }
 
-    // Persist initial queue and playback state to DB
-    await dbRepository.saveQueue(roomId, room.queue);
-    const pbState = room.toPlaybackState();
-    await dbRepository.savePlaybackState(roomId, {
-      trackId: pbState.trackId,
-      isPlaying: pbState.isPlaying,
-      positionMs: Math.round(pbState.position * 1000),
-      startedAt: pbState.startedAt,
-      version: pbState.version,
-    });
+    // Note: PlaybackState is already initialized in PostgreSQL during the atomic createRoom transaction.
+    // If room has preloaded initial queue items, persist them; otherwise avoid redundant empty deleteMany roundtrip.
+    if (room.queue.length > 0) {
+      await dbRepository.saveQueue(roomId, room.queue);
+    }
+
+    const totalDurationMs = Math.round(performance.now() - tStart);
+    logger.info(`[ROOM_CREATE] room_created durationMs=${totalDurationMs} roomId=${roomId} code=${code}`);
 
     return { room, user: adminUser, sessionId: sessionToken, sessionToken };
   }

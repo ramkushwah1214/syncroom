@@ -10,6 +10,7 @@ import { playbackManager } from '../audio/PlaybackProvider';
 import { spotifyPlaybackProvider } from '../audio/SpotifyPlaybackProvider';
 import { serverClock } from '../services/serverClock';
 import { saveSession, getSession, clearSession } from '../services/session';
+import { getApiBaseUrl } from '../config/runtime';
 
 interface RoomContextType {
   currentRoom: Room | null;
@@ -74,6 +75,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const showToastRef = useRef(showToast);
   showToastRef.current = showToast;
   const lastQueueVersionRef = useRef<number>(0);
+  const isCreatingRef = useRef<boolean>(false);
 
   // Real measured Connection Quality:
   const [connectionQuality, setConnectionQuality] = useState<ConnectionStatusType>('connected');
@@ -507,30 +509,146 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const clearError = useCallback(() => setError(null), []);
 
   const createRoom = async (name: string, adminName: string): Promise<Room> => {
+    if (isCreatingRef.current) {
+      console.warn('[ROOM_CREATE] Ignored duplicate createRoom invocation while previous request is pending.');
+      throw new Error('Room creation already in progress.');
+    }
+    isCreatingRef.current = true;
+
+    const tClick = performance.now();
+    console.log('[ROOM_CREATE] frontend_click');
     setError(null);
 
-    // Ensure socket is connected
-    if (socketService.getStatus() !== 'connected') {
-      await socketService.connect();
-    }
+    const device = typeof window !== 'undefined' && window.innerWidth < 768 ? 'mobile' : 'desktop';
+    const apiBaseUrl = getApiBaseUrl();
 
-    return new Promise((resolve, reject) => {
-      pendingActionRef.current = { resolve, reject };
+    try {
+      // 1. Fast-Path: REST API Creation (decoupled from WebSocket connection state)
+      if (apiBaseUrl) {
+        console.log('[ROOM_CREATE] api_request_start');
+        const tApiStart = performance.now();
 
-      const sent = socketService.send({
-        type: 'CREATE_ROOM',
-        name,
-        adminName,
-        device: typeof window !== 'undefined' && window.innerWidth < 768 ? 'mobile' : 'desktop',
-      });
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 12000);
 
-      if (!sent) {
-        pendingActionRef.current = null;
-        const err = new Error('WebSocket connection unavailable');
-        setError(err.message);
-        reject(err);
+          const res = await fetch(`${apiBaseUrl}/api/rooms`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: JSON.stringify({ name, adminName, device }),
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          if (res.ok) {
+            const data = await res.json();
+            const apiDurationMs = Math.round(performance.now() - tApiStart);
+            console.log(`[ROOM_CREATE] api_response_received durationMs=${apiDurationMs} status=${res.status}`);
+
+            const room: Room = data.room;
+            const user: User = data.user;
+            const sessionToken = data.sessionToken || data.sessionId;
+
+            // Save persistent session immediately
+            saveSession({
+              sessionToken,
+              userId: user.id,
+              roomId: room.id,
+              roomCode: room.code,
+              role: user.role,
+              userName: user.name,
+            });
+
+            lastQueueVersionRef.current = room.queueVersion || 1;
+            setCurrentRoom(room);
+            setCurrentUser(user);
+            setCreatedRoomNotice({ room, adminUser: user });
+            setActiveView('room');
+
+            if (room.playerState) {
+              syncEngine.handlePlaybackState(room.playerState as any);
+            }
+
+            showToastRef.current({
+              type: 'success',
+              title: 'Room Created!',
+              description: `Room code: ${room.code}. You are the session Host.`,
+            });
+
+            // Decoupled Background WebSocket connection & sync
+            (async () => {
+              console.log('[ROOM_CREATE] websocket_init_start');
+              const tWsStart = performance.now();
+              try {
+                if (socketService.getStatus() !== 'connected') {
+                  await socketService.connect();
+                }
+                socketService.send({
+                  type: 'RECONNECT_SESSION',
+                  sessionToken,
+                  sessionId: sessionToken,
+                });
+                const wsDurationMs = Math.round(performance.now() - tWsStart);
+                console.log(`[ROOM_CREATE] websocket_init_end durationMs=${wsDurationMs}`);
+              } catch (wsErr) {
+                console.warn('[ROOM_CREATE] Background WebSocket attach failed:', wsErr);
+              }
+            })();
+
+            return room;
+          } else {
+            const errData = await res.json().catch(() => null);
+            const errMsg = errData?.error || `HTTP ${res.status}: Failed to create room`;
+            console.warn('[ROOM_CREATE] REST endpoint returned non-200, attempting WebSocket fallback:', errMsg);
+            if (res.status === 400 || res.status === 429) {
+              setError(errMsg);
+              throw new Error(errMsg);
+            }
+          }
+        } catch (fetchErr: any) {
+          if (fetchErr?.name === 'AbortError') {
+            console.warn('[ROOM_CREATE] REST request timed out, falling back to WebSocket path');
+          } else if (
+            fetchErr?.message &&
+            (fetchErr.message.includes('already in progress') || fetchErr.message.includes('required'))
+          ) {
+            throw fetchErr;
+          } else {
+            console.warn('[ROOM_CREATE] REST request failed, falling back to WebSocket:', fetchErr?.message);
+          }
+        }
       }
-    });
+
+      // 2. Fallback: WebSocket CREATE_ROOM path
+      console.log('[ROOM_CREATE] falling back to WebSocket CREATE_ROOM');
+      if (socketService.getStatus() !== 'connected') {
+        await socketService.connect();
+      }
+
+      return await new Promise<Room>((resolve, reject) => {
+        pendingActionRef.current = { resolve, reject };
+
+        const sent = socketService.send({
+          type: 'CREATE_ROOM',
+          name,
+          adminName,
+          device,
+        });
+
+        if (!sent) {
+          pendingActionRef.current = null;
+          const err = new Error('WebSocket connection unavailable');
+          setError(err.message);
+          reject(err);
+        }
+      });
+    } finally {
+      isCreatingRef.current = false;
+    }
   };
 
   const joinRoom = async (code: string, displayName: string): Promise<Room> => {

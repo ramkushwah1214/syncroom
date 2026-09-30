@@ -4,6 +4,8 @@ import { Track, QueueItem } from '../../src/types';
 import { ActivityItem } from '../types';
 import { logger } from '../utils/logger';
 
+import { performance } from 'perf_hooks';
+
 /**
  * Generates a cryptographically secure random session token.
  * Format: syncroom_session_<64-hex-chars>
@@ -64,7 +66,7 @@ export class DbRepository {
     adminName: string;
     userAgent?: string;
     deviceName?: string;
-  }): Promise<{ sessionToken: string; sessionTokenHash: string }> {
+  }): Promise<{ sessionToken: string; sessionTokenHash: string; durationMs: number }> {
     this.ensureConfigured();
 
     try {
@@ -74,94 +76,124 @@ export class DbRepository {
       const sessionToken = generateSessionToken();
       const sessionTokenHash = hashSessionToken(sessionToken);
       const sessionId = `ds_${crypto.randomBytes(12).toString('hex')}`;
+      const memberId = `rm_${crypto.randomBytes(12).toString('hex')}`;
+      const actId = `act_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+      const deviceName = params.deviceName || 'desktop';
+      const userAgent = params.userAgent || null;
+      const metadataStr = JSON.stringify({ name: params.name, admin: params.adminName });
 
-      await withDbRetry(() => prisma.$transaction(async (tx) => {
-        // 1. Create or upsert Admin User
-        await tx.user.upsert({
-          where: { id: params.adminUserId },
-          create: {
-            id: params.adminUserId,
-            name: params.adminName,
-            createdAt: now,
-            updatedAt: now,
-          },
-          update: {
-            name: params.adminName,
-            updatedAt: now,
-          },
-        });
+      const tQueryStart = performance.now();
+      logger.info(`[ROOM_CREATE] db_query_start roomId=${params.roomId}`);
 
-        // 2. Create Room
-        await tx.room.create({
-          data: {
-            id: params.roomId,
-            code: params.code,
-            name: params.name,
-            adminUserId: params.adminUserId,
-            createdAt: now,
-            updatedAt: now,
-            lastActiveAt: now,
-            status: 'ACTIVE',
-          },
-        });
+      await withDbRetry(async () => {
+        try {
+          // Single-roundtrip atomic CTE transaction executes in 1 WAN network trip
+          await prisma.$executeRaw`
+            WITH ins_user AS (
+              INSERT INTO "User" ("id", "name", "createdAt", "updatedAt")
+              VALUES (${params.adminUserId}, ${params.adminName}, ${now}, ${now})
+              ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "updatedAt" = ${now}
+              RETURNING "id"
+            ),
+            ins_room AS (
+              INSERT INTO "Room" ("id", "code", "name", "adminUserId", "createdAt", "updatedAt", "lastActiveAt", "status")
+              SELECT ${params.roomId}, ${params.code}, ${params.name}, "id", ${now}, ${now}, ${now}, 'ACTIVE'::"RoomStatus"
+              FROM ins_user
+              RETURNING "id"
+            ),
+            ins_member AS (
+              INSERT INTO "RoomMember" ("id", "roomId", "userId", "role", "joinedAt", "lastSeenAt", "isActive")
+              SELECT ${memberId}, "id", ${params.adminUserId}, 'ADMIN'::"Role", ${now}, ${now}, true
+              FROM ins_room
+            ),
+            ins_session AS (
+              INSERT INTO "DeviceSession" ("id", "userId", "roomId", "sessionTokenHash", "role", "createdAt", "lastSeenAt", "expiresAt", "userAgent", "deviceName")
+              SELECT ${sessionId}, ${params.adminUserId}, "id", ${sessionTokenHash}, 'ADMIN'::"Role", ${now}, ${now}, ${expiresAt}, ${userAgent}, ${deviceName}
+              FROM ins_room
+            ),
+            ins_pb AS (
+              INSERT INTO "PlaybackState" ("roomId", "isPlaying", "positionMs", "version", "updatedAt")
+              SELECT "id", false, 0, 1, ${now}
+              FROM ins_room
+            )
+            INSERT INTO "AuditLog" ("id", "roomId", "userId", "action", "metadata", "createdAt")
+            SELECT ${actId}, "id", ${params.adminUserId}, 'ROOM_CREATED', ${metadataStr}, ${now}
+            FROM ins_room;
+          `;
+        } catch (rawErr: any) {
+          logger.warn(`[SyncRoom DB] Raw CTE createRoom failed (${rawErr?.message}), falling back to interactive transaction`);
+          await prisma.$transaction(async (tx) => {
+            await tx.user.upsert({
+              where: { id: params.adminUserId },
+              create: { id: params.adminUserId, name: params.adminName, createdAt: now, updatedAt: now },
+              update: { name: params.adminName, updatedAt: now },
+            });
+            await tx.room.create({
+              data: {
+                id: params.roomId,
+                code: params.code,
+                name: params.name,
+                adminUserId: params.adminUserId,
+                createdAt: now,
+                updatedAt: now,
+                lastActiveAt: now,
+                status: 'ACTIVE',
+              },
+            });
+            await tx.roomMember.create({
+              data: {
+                id: memberId,
+                roomId: params.roomId,
+                userId: params.adminUserId,
+                role: 'ADMIN',
+                joinedAt: now,
+                lastSeenAt: now,
+                isActive: true,
+              },
+            });
+            await tx.deviceSession.create({
+              data: {
+                id: sessionId,
+                userId: params.adminUserId,
+                roomId: params.roomId,
+                sessionTokenHash,
+                role: 'ADMIN',
+                createdAt: now,
+                lastSeenAt: now,
+                expiresAt,
+                userAgent,
+                deviceName,
+              },
+            });
+            await tx.playbackState.create({
+              data: {
+                roomId: params.roomId,
+                trackId: null,
+                isPlaying: false,
+                positionMs: 0,
+                startedAt: null,
+                version: 1,
+                updatedAt: now,
+              },
+            });
+            await tx.auditLog.create({
+              data: {
+                id: actId,
+                roomId: params.roomId,
+                userId: params.adminUserId,
+                action: 'ROOM_CREATED',
+                metadata: metadataStr,
+                createdAt: now,
+              },
+            });
+          }, { timeout: 15000, maxWait: 10000 });
+        }
+      });
 
-        // 3. Create RoomMember with ADMIN role
-        const memberId = `rm_${crypto.randomBytes(12).toString('hex')}`;
-        await tx.roomMember.create({
-          data: {
-            id: memberId,
-            roomId: params.roomId,
-            userId: params.adminUserId,
-            role: 'ADMIN',
-            joinedAt: now,
-            lastSeenAt: now,
-            isActive: true,
-          },
-        });
+      const dbDurationMs = Math.round(performance.now() - tQueryStart);
+      logger.info(`[ROOM_CREATE] db_query_end durationMs=${dbDurationMs} roomId=${params.roomId}`);
 
-        // 4. Create DeviceSession storing only hashed session token
-        await tx.deviceSession.create({
-          data: {
-            id: sessionId,
-            userId: params.adminUserId,
-            roomId: params.roomId,
-            sessionTokenHash,
-            role: 'ADMIN',
-            createdAt: now,
-            lastSeenAt: now,
-            expiresAt,
-            userAgent: params.userAgent || null,
-            deviceName: params.deviceName || null,
-          },
-        });
-
-        // 5. Initialize PlaybackState in database
-        await tx.playbackState.create({
-          data: {
-            roomId: params.roomId,
-            trackId: null,
-            isPlaying: false,
-            positionMs: 0,
-            startedAt: null,
-            version: 1,
-            updatedAt: now,
-          },
-        });
-
-        // 6. Record AuditLog entry
-        await tx.auditLog.create({
-          data: {
-            id: `act_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`,
-            roomId: params.roomId,
-            userId: params.adminUserId,
-            action: 'ROOM_CREATED',
-            metadata: JSON.stringify({ name: params.name, admin: params.adminName }),
-            createdAt: now,
-          },
-        });
-      }, { timeout: 15000, maxWait: 10000 }));
-
-      return { sessionToken, sessionTokenHash };
+      return { sessionToken, sessionTokenHash, durationMs: dbDurationMs };
     } catch (error) {
       logger.error('[SyncRoom DB] Error creating room in PostgreSQL', error);
       throw new Error('DATABASE_ERROR: Failed to create room in database', { cause: error });
