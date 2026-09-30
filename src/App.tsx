@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ToastProvider } from './context/ToastContext';
 import { RoomProvider, useRoom } from './context/RoomContext';
+import { AppView } from './types';
 import { LandingPage } from './views/LandingPage';
 import { CreateRoomForm } from './components/CreateRoomForm';
 import { JoinRoomForm } from './components/JoinRoomForm';
@@ -42,15 +43,61 @@ function SyncRoomApp() {
 
   const [isLandingPlaylistsOpen, setIsLandingPlaylistsOpen] = useState(false);
 
-  // If URL has ?code=XXXXXX and user is on landing page without active room, auto-open Join screen
+  // Handle initial URL path and popstate browser navigation for /syncroom/, /create, /join
   useEffect(() => {
-    if (typeof window !== 'undefined' && activeView === 'landing' && !currentRoom) {
+    if (typeof window === 'undefined') return;
+
+    const parseViewFromUrl = (): AppView | null => {
+      const path = window.location.pathname.replace(/^\/syncroom/, '') || '/';
       const params = new URLSearchParams(window.location.search);
-      if (params.get('code')) {
-        setActiveView('join');
+      if (params.get('code') || path === '/join' || path.startsWith('/join/')) {
+        return 'join';
+      }
+      if (path === '/create' || path.startsWith('/create/')) {
+        return 'create';
+      }
+      if (path === '/' || path === '') {
+        return 'landing';
+      }
+      return null;
+    };
+
+    if (!currentRoom) {
+      const initialView = parseViewFromUrl();
+      if (initialView && initialView !== activeView) {
+        setActiveView(initialView);
       }
     }
-  }, [activeView, currentRoom, setActiveView]);
+
+    const handlePopState = () => {
+      if (!currentRoom) {
+        const view = parseViewFromUrl();
+        if (view) setActiveView(view);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentRoom, setActiveView]);
+
+  // Synchronize browser history path when activeView changes outside an active room
+  useEffect(() => {
+    if (typeof window === 'undefined' || currentRoom) return;
+
+    const isSubpath = window.location.pathname.startsWith('/syncroom');
+    const basePath = isSubpath ? '/syncroom' : '';
+    let targetPath = basePath || '/';
+    if (activeView === 'create') {
+      targetPath = `${basePath}/create`;
+    } else if (activeView === 'join') {
+      const search = window.location.search;
+      targetPath = `${basePath}/join${search}`;
+    }
+
+    if (window.location.pathname !== targetPath.split('?')[0]) {
+      window.history.replaceState({ view: activeView }, '', targetPath);
+    }
+  }, [activeView, currentRoom]);
 
   return (
     <div className="min-h-screen bg-[#08080a] text-neutral-100 flex flex-col font-sans">

@@ -13,8 +13,9 @@ createRoot(document.getElementById('root')!).render(
 // Register safe static asset service worker (Phase 11 PWA)
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
+    const swUrl = `${import.meta.env.BASE_URL}sw.js`;
     navigator.serviceWorker
-      .register('/sw.js')
+      .register(swUrl)
       .then(() => {
         // Service worker active for static shell caching
       })

@@ -1,11 +1,30 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
+  const base = process.env.VITE_BASE || (command === 'build' ? '/syncroom/' : '/');
+
   return {
-    plugins: [react(), tailwindcss()],
+    base,
+    plugins: [
+      react(),
+      tailwindcss(),
+      {
+        name: 'copy-404-html',
+        closeBundle() {
+          const distDir = path.resolve(import.meta.dirname, 'dist');
+          const distIndex = path.resolve(distDir, 'index.html');
+          const dist404 = path.resolve(distDir, '404.html');
+          if (fs.existsSync(distIndex)) {
+            fs.copyFileSync(distIndex, dist404);
+            console.log('[Vite Build] Created dist/404.html for GitHub Pages SPA fallback.');
+          }
+        },
+      },
+    ],
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),
