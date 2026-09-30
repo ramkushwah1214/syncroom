@@ -15,10 +15,11 @@ export default defineConfig(({ command }) => {
       {
         name: 'copy-404-and-sync-docs',
         closeBundle() {
-          const distDir = path.resolve(import.meta.dirname, 'dist');
+          const rootDir = import.meta.dirname || process.cwd();
+          const distDir = path.resolve(rootDir, 'dist');
           const distIndex = path.resolve(distDir, 'index.html');
           const dist404 = path.resolve(distDir, '404.html');
-          const docsDir = path.resolve(import.meta.dirname, 'docs');
+          const docsDir = path.resolve(rootDir, 'docs');
           if (fs.existsSync(distIndex)) {
             fs.copyFileSync(distIndex, dist404);
             console.log('[Vite Build] Created dist/404.html for GitHub Pages SPA fallback.');
@@ -38,7 +39,7 @@ export default defineConfig(({ command }) => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(import.meta.dirname, '.'),
+        '@': path.resolve(import.meta.dirname || process.cwd(), '.'),
       },
     },
     server: {
