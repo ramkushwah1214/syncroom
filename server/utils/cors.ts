@@ -9,7 +9,9 @@ export function getAllowedOrigins(): string[] {
     process.env.FRONTEND_URL,
   ];
 
-  const list: string[] = [];
+  const list: string[] = [
+    'https://ramkushwah1214.github.io',
+  ];
 
   for (const envVal of envOrigins) {
     if (envVal?.trim()) {

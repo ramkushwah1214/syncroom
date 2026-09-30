@@ -159,21 +159,34 @@ class SocketService {
       return Promise.reject(err);
     }
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      let isSettled = false;
+      const timeoutTimer = setTimeout(() => {
+        if (!isSettled) {
+          isSettled = true;
+          this.setStatus('disconnected');
+          reject(new Error('WebSocket connection timed out'));
+        }
+      }, 7000);
+
       try {
         this.ws = new WebSocket(socketUrl);
 
         this.ws.onopen = () => {
-          this.setStatus('connected');
-          this.reconnectAttempts = 0;
-          this.lastPongTime = Date.now();
-          if (this.reconnectTimeout) {
-            clearTimeout(this.reconnectTimeout);
-            this.reconnectTimeout = null;
+          if (!isSettled) {
+            isSettled = true;
+            clearTimeout(timeoutTimer);
+            this.setStatus('connected');
+            this.reconnectAttempts = 0;
+            this.lastPongTime = Date.now();
+            if (this.reconnectTimeout) {
+              clearTimeout(this.reconnectTimeout);
+              this.reconnectTimeout = null;
+            }
+            this.startHeartbeat();
+            console.log(`[SYNC] event=connection_open status=connected`);
+            resolve();
           }
-          this.startHeartbeat();
-          console.log(`[SYNC] event=connection_open status=connected`);
-          resolve();
         };
 
         this.ws.onmessage = (event: MessageEvent) => {
@@ -197,6 +210,12 @@ class SocketService {
           this.stopHeartbeat();
           console.log(`[SYNC] event=connection_close code=${event.code} reason=${event.reason || 'none'}`);
 
+          if (!isSettled) {
+            isSettled = true;
+            clearTimeout(timeoutTimer);
+            reject(new Error(`WebSocket connection failed with code ${event.code}`));
+          }
+
           if (this.explicitDisconnect) {
             this.setStatus('disconnected');
             return;
@@ -219,10 +238,14 @@ class SocketService {
           // Handled by close event
         };
       } catch (err) {
-        console.error('[SyncRoom Socket] Connection initialization failed:', err);
-        this.setStatus('disconnected');
-        this.scheduleReconnect();
-        resolve();
+        if (!isSettled) {
+          isSettled = true;
+          clearTimeout(timeoutTimer);
+          console.error('[SyncRoom Socket] Connection initialization failed:', err);
+          this.setStatus('disconnected');
+          this.scheduleReconnect();
+          reject(err);
+        }
       }
     });
   }

@@ -10,7 +10,7 @@ import { playbackManager } from '../audio/PlaybackProvider';
 import { spotifyPlaybackProvider } from '../audio/SpotifyPlaybackProvider';
 import { serverClock } from '../services/serverClock';
 import { saveSession, getSession, clearSession } from '../services/session';
-import { getApiBaseUrl } from '../config/runtime';
+import { getApiBaseUrl, getRuntimeConfig } from '../config/runtime';
 
 interface RoomContextType {
   currentRoom: Room | null;
@@ -521,8 +521,18 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const device = typeof window !== 'undefined' && window.innerWidth < 768 ? 'mobile' : 'desktop';
     const apiBaseUrl = getApiBaseUrl();
+    const runtimeConfig = getRuntimeConfig();
 
     try {
+      // 0. Pre-flight check: If no backend is configured at all (e.g. static GitHub Pages without VITE_API_URL)
+      if (!apiBaseUrl && (!runtimeConfig.wsUrl || runtimeConfig.configurationError)) {
+        const msg =
+          runtimeConfig.configurationError ||
+          'Unable to reach the SyncRoom server. No backend server configured (VITE_API_URL is missing).';
+        setError(msg);
+        throw new Error(msg);
+      }
+
       // 1. Fast-Path: REST API Creation (decoupled from WebSocket connection state)
       if (apiBaseUrl) {
         console.log('[ROOM_CREATE] api_request_start');
@@ -530,7 +540,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000);
+          const timeoutId = setTimeout(() => controller.abort(), 10000);
 
           const res = await fetch(`${apiBaseUrl}/api/rooms`, {
             method: 'POST',
@@ -579,7 +589,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
               description: `Room code: ${room.code}. You are the session Host.`,
             });
 
-            // Decoupled Background WebSocket connection & sync
+            // Decoupled Background WebSocket connection & sync (never blocks room view)
             (async () => {
               console.log('[ROOM_CREATE] websocket_init_start');
               const tWsStart = performance.now();
@@ -595,7 +605,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const wsDurationMs = Math.round(performance.now() - tWsStart);
                 console.log(`[ROOM_CREATE] websocket_init_end durationMs=${wsDurationMs}`);
               } catch (wsErr) {
-                console.warn('[ROOM_CREATE] Background WebSocket attach failed:', wsErr);
+                console.warn('[ROOM_CREATE] Background WebSocket attach failed (will reconnect automatically):', wsErr);
               }
             })();
 
@@ -624,13 +634,45 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       // 2. Fallback: WebSocket CREATE_ROOM path
+      if (!runtimeConfig.wsUrl || runtimeConfig.configurationError) {
+        const msg =
+          runtimeConfig.configurationError ||
+          'Unable to reach the SyncRoom server. Please check your backend connection.';
+        setError(msg);
+        throw new Error(msg);
+      }
+
       console.log('[ROOM_CREATE] falling back to WebSocket CREATE_ROOM');
       if (socketService.getStatus() !== 'connected') {
-        await socketService.connect();
+        try {
+          await socketService.connect();
+        } catch (connErr) {
+          const errMsg = 'Unable to reach the SyncRoom server. Please verify your backend server is online and try again.';
+          setError(errMsg);
+          throw new Error(errMsg);
+        }
       }
 
       return await new Promise<Room>((resolve, reject) => {
-        pendingActionRef.current = { resolve, reject };
+        const timeoutId = setTimeout(() => {
+          if (pendingActionRef.current) {
+            pendingActionRef.current = null;
+            const timeoutErr = new Error('Unable to reach the SyncRoom server. Room creation timed out.');
+            setError(timeoutErr.message);
+            reject(timeoutErr);
+          }
+        }, 10000);
+
+        pendingActionRef.current = {
+          resolve: (room) => {
+            clearTimeout(timeoutId);
+            resolve(room);
+          },
+          reject: (err) => {
+            clearTimeout(timeoutId);
+            reject(err);
+          },
+        };
 
         const sent = socketService.send({
           type: 'CREATE_ROOM',
@@ -640,8 +682,9 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
 
         if (!sent) {
+          clearTimeout(timeoutId);
           pendingActionRef.current = null;
-          const err = new Error('WebSocket connection unavailable');
+          const err = new Error('WebSocket connection unavailable. Unable to send create room request.');
           setError(err.message);
           reject(err);
         }
@@ -654,12 +697,45 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const joinRoom = async (code: string, displayName: string): Promise<Room> => {
     setError(null);
 
+    const runtimeConfig = getRuntimeConfig();
+    if (!runtimeConfig.wsUrl || runtimeConfig.configurationError) {
+      const msg =
+        runtimeConfig.configurationError ||
+        'Unable to join room: No backend server configured.';
+      setError(msg);
+      throw new Error(msg);
+    }
+
     if (socketService.getStatus() !== 'connected') {
-      await socketService.connect();
+      try {
+        await socketService.connect();
+      } catch (connErr) {
+        const errMsg = 'Unable to connect to the SyncRoom server. Please verify your backend server is online.';
+        setError(errMsg);
+        throw new Error(errMsg);
+      }
     }
 
     return new Promise((resolve, reject) => {
-      pendingActionRef.current = { resolve, reject };
+      const timeoutId = setTimeout(() => {
+        if (pendingActionRef.current) {
+          pendingActionRef.current = null;
+          const timeoutErr = new Error('Unable to reach the SyncRoom server. Join request timed out.');
+          setError(timeoutErr.message);
+          reject(timeoutErr);
+        }
+      }, 10000);
+
+      pendingActionRef.current = {
+        resolve: (room) => {
+          clearTimeout(timeoutId);
+          resolve(room);
+        },
+        reject: (err) => {
+          clearTimeout(timeoutId);
+          reject(err);
+        },
+      };
 
       const sent = socketService.send({
         type: 'JOIN_ROOM',
@@ -669,6 +745,7 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
 
       if (!sent) {
+        clearTimeout(timeoutId);
         pendingActionRef.current = null;
         const err = new Error('WebSocket connection unavailable');
         setError(err.message);

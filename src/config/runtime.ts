@@ -38,6 +38,14 @@ export function validateWebSocketUrl(url: string, isProduction: boolean, isHttps
     };
   }
 
+  // GitHub Pages domain check: GitHub Pages can NEVER host a WebSocket server
+  if (url.includes('github.io')) {
+    return {
+      isValid: false,
+      error: `Configuration Error: WebSocket URL cannot point to GitHub Pages (${url}) because GitHub Pages only hosts static files and does not run WebSocket servers. Please configure VITE_WS_URL to point to your real production backend (e.g. wss://backend.yourdomain.com/ws).`,
+    };
+  }
+
   return { isValid: true, error: null };
 }
 
@@ -47,38 +55,105 @@ export function validateWebSocketUrl(url: string, isProduction: boolean, isHttps
 export function getRuntimeConfig(): RuntimeConfig {
   const isBrowser = typeof window !== 'undefined';
   const isHttps = isBrowser ? window.location.protocol === 'https:' : false;
-  const isProduction = env.IS_PROD || (isBrowser && isHttps && !window.location.hostname.includes('localhost'));
+  const isLocalhost =
+    isBrowser &&
+    (window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname === '[::1]');
+  const isGitHubPages = isBrowser && window.location.hostname.includes('github.io');
+  const isProduction =
+    env.IS_PROD || (isBrowser && isHttps && !isLocalhost);
 
-  // 1. Resolve WebSocket URL: prefer VITE_WS_URL, then browser origin with wss/ws
+  // 1. Resolve API URL
+  // Priority: env.API_URL -> localStorage override -> localhost fallback -> empty on GitHub Pages
+  let resolvedApiUrl = env.API_URL?.trim();
+
+  if (!resolvedApiUrl && isBrowser) {
+    try {
+      const storedApi =
+        localStorage.getItem('VITE_API_URL') ||
+        localStorage.getItem('SYNCROOM_API_URL');
+      if (storedApi?.trim()) {
+        resolvedApiUrl = storedApi.trim();
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }
+
+  if (!resolvedApiUrl && isBrowser) {
+    if (isLocalhost) {
+      resolvedApiUrl = window.location.origin;
+    } else if (isGitHubPages) {
+      // On GitHub Pages, NEVER default to GitHub Pages origin: GitHub Pages has no backend APIs
+      resolvedApiUrl = '';
+    } else {
+      // Co-located production deployments (e.g. Docker container, VPS, full-stack host)
+      resolvedApiUrl = window.location.origin;
+    }
+  }
+
+  // 2. Resolve WebSocket URL
+  // Priority: env.WS_URL -> localStorage override -> derived from resolvedApiUrl -> localhost fallback -> empty on GitHub Pages
   let resolvedWsUrl = env.WS_URL?.trim();
 
   if (!resolvedWsUrl && isBrowser) {
-    const protocol = isHttps ? 'wss:' : 'ws:';
-    resolvedWsUrl = `${protocol}//${window.location.host}/ws`;
+    try {
+      const storedWs =
+        localStorage.getItem('VITE_WS_URL') ||
+        localStorage.getItem('SYNCROOM_WS_URL');
+      if (storedWs?.trim()) {
+        resolvedWsUrl = storedWs.trim();
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
   }
 
   if (!resolvedWsUrl) {
-    resolvedWsUrl = '';
+    if (resolvedApiUrl) {
+      // Automatically derive wss:// / ws:// endpoint from configured backend API URL
+      const wsProtocol = resolvedApiUrl.startsWith('https:') ? 'wss:' : 'ws:';
+      const cleanHost = resolvedApiUrl
+        .replace(/^https?:\/\//, '')
+        .replace(/\/.*$/, '');
+      resolvedWsUrl = `${wsProtocol}//${cleanHost}/ws`;
+    } else if (isBrowser) {
+      if (isLocalhost) {
+        const protocol = isHttps ? 'wss:' : 'ws:';
+        resolvedWsUrl = `${protocol}//${window.location.host}/ws`;
+      } else if (isGitHubPages) {
+        // DO NOT derive wss://ramkushwah1214.github.io/ws
+        resolvedWsUrl = '';
+      } else {
+        const protocol = isHttps ? 'wss:' : 'ws:';
+        resolvedWsUrl = `${protocol}//${window.location.host}/ws`;
+      }
+    }
   }
 
-  // 2. Validate Security
-  const validation = validateWebSocketUrl(resolvedWsUrl, isProduction, isHttps);
-
-  // 3. Resolve API URL: prefer VITE_API_URL, then browser origin
-  let resolvedApiUrl = env.API_URL?.trim();
-  if (!resolvedApiUrl && isBrowser) {
-    resolvedApiUrl = window.location.origin;
-  }
-  if (!resolvedApiUrl) {
-    resolvedApiUrl = '';
+  // 3. Security & Validation
+  let configError: string | null = null;
+  if (!resolvedWsUrl) {
+    if (isGitHubPages) {
+      configError =
+        'Backend connection not configured. Please configure VITE_API_URL and VITE_WS_URL with your deployed SyncRoom server.';
+    } else {
+      configError = 'WebSocket URL is undefined or empty.';
+    }
+  } else {
+    const validation = validateWebSocketUrl(resolvedWsUrl, isProduction, isHttps);
+    if (!validation.isValid) {
+      configError = validation.error;
+    }
   }
 
   return {
-    apiUrl: resolvedApiUrl,
-    wsUrl: resolvedWsUrl,
+    apiUrl: resolvedApiUrl || '',
+    wsUrl: resolvedWsUrl || '',
     isProduction,
-    isSecure: isHttps || resolvedWsUrl.startsWith('wss:'),
-    configurationError: validation.isValid ? null : validation.error,
+    isSecure: isHttps || (resolvedWsUrl ? resolvedWsUrl.startsWith('wss:') : false),
+    configurationError: configError,
   };
 }
 
