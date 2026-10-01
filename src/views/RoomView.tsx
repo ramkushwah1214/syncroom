@@ -16,6 +16,8 @@ import { SyncStatus } from '../audio/types';
 import { playbackManager, SpotifyPlayerStatus } from '../audio/PlaybackProvider';
 import { openSpotifyLoginPopup } from '../services/music/SpotifyMusicProvider';
 
+import { AudioDiagnosticsBlock } from '../components/AudioDiagnosticsBlock';
+
 interface RoomViewProps {
   room: Room;
   currentRole: UserRole;
@@ -127,7 +129,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
             onClick={() => syncEngine.unlockAutoplay()}
             className="px-4 py-1.5 rounded-lg bg-amber-400 text-neutral-950 font-semibold text-xs hover:bg-amber-300 transition-colors shadow-md shadow-amber-400/20"
           >
-            Tap to Enable Audio
+            Tap Enable Audio
           </button>
         </div>
       )}
@@ -138,7 +140,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
           <div className="flex items-center gap-2.5 min-w-0">
             <Radio className="w-4 h-4 text-emerald-400 shrink-0 animate-pulse" />
             <div className="flex flex-col text-left min-w-0">
-              <span className="font-semibold text-emerald-200 text-xs">Connect Spotify to enable audio</span>
+              <span className="font-semibold text-emerald-200 text-xs">Connect Spotify to enable playback</span>
               <span className="text-[11px] text-emerald-300/80 truncate">
                 Each listener browser requires its own authenticated Spotify account to play music.
               </span>
@@ -149,7 +151,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
             onClick={openSpotifyLoginPopup}
             className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs transition-colors shrink-0 ml-3 shadow-md shadow-emerald-500/20"
           >
-            Connect Spotify
+            Connect Spotify to enable playback
           </button>
         </div>
       )}
@@ -259,7 +261,7 @@ export const RoomView: React.FC<RoomViewProps> = ({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
           {/* Main Music Player Stage */}
           <div
-            className={`lg:col-span-7 xl:col-span-8 flex justify-center ${
+            className={`lg:col-span-7 xl:col-span-8 flex flex-col gap-4 ${
               activeMobileTab !== 'player' ? 'hidden lg:flex' : 'flex'
             }`}
           >
@@ -278,6 +280,11 @@ export const RoomView: React.FC<RoomViewProps> = ({
               onToggleRepeat={handleToggleRepeat}
               onOpenAddTrack={isAdmin ? () => setIsAddTrackOpen(true) : undefined}
               className="w-full"
+            />
+            <AudioDiagnosticsBlock
+              currentRole={currentRole}
+              room={room}
+              onConnectSpotify={openSpotifyLoginPopup}
             />
           </div>
 

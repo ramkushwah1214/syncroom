@@ -186,7 +186,7 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
         this.logDiagnostic('Access token expired', true);
         if (res.status === 401) {
           this.status = 'CONNECT_SPOTIFY';
-          this.errorMessage = 'Connect Spotify to enable audio.';
+          this.errorMessage = 'Connect Spotify to enable playback.';
           this.logMemberPlaybackLifecycle('token_fetch_unauthenticated');
           this.notifyListeners();
         }
@@ -210,6 +210,14 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
     }
   }
 
+  public hasValidToken(): boolean {
+    return Boolean(this.cachedToken && Date.now() < this.tokenExpiresAt);
+  }
+
+  public isPlayerReady(): boolean {
+    return Boolean(this.deviceId && (this.status === 'PLAYER_READY' || this.status === 'PLAYING' || this.status === 'PAUSED'));
+  }
+
   /**
    * Safe diagnostics logger - NEVER logs tokens, secrets, or sensitive headers
    */
@@ -218,6 +226,29 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       return;
     }
     console.log(`[Spotify Playback Diagnostics] ${key}:`, value);
+  }
+
+  /**
+   * Safe structured audio logger for Member session verification.
+   * Format:
+   * [MEMBER_AUDIO] roomConnected=true/false spotifyTokenAvailable=true/false playerCreated=true/false playerConnected=true/false ready=true/false deviceIdPresent=true/false playbackState=playing/paused/unavailable
+   * Strictly NEVER logs access tokens, refresh tokens, secrets, or authorization headers.
+   */
+  public logMemberAudio(context?: string): void {
+    const isSocketConnected = typeof window !== 'undefined' && socketService ? socketService.getStatus() === 'connected' : false;
+    const spotifyTokenAvailable = this.hasValidToken();
+    const playerCreated = Boolean(this.player);
+    const playerConnected = Boolean(this.connectSucceeded);
+    const ready = this.isPlayerReady();
+    const deviceIdPresent = Boolean(this.deviceId);
+    const playbackState =
+      this.status === 'PLAYING' ? 'playing' :
+      this.status === 'PAUSED' ? 'paused' :
+      'unavailable';
+
+    console.log(
+      `[MEMBER_AUDIO]${context ? ` [${context}]` : ''} roomConnected=${isSocketConnected} spotifyTokenAvailable=${spotifyTokenAvailable} playerCreated=${playerCreated} playerConnected=${playerConnected} ready=${ready} deviceIdPresent=${deviceIdPresent} playbackState=${playbackState}`
+    );
   }
 
   /**
@@ -372,7 +403,7 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
     if (!token) {
       this.logDiagnostic('Access token available', false);
       this.status = 'CONNECT_SPOTIFY';
-      this.errorMessage = 'Connect Spotify to enable audio.';
+      this.errorMessage = 'Connect Spotify to enable playback.';
       this.logMemberPlaybackLifecycle('initialize_no_token');
       this.notifyListeners();
       return false;
@@ -512,7 +543,7 @@ export class SpotifyPlaybackProvider implements PlaybackProvider {
       console.error('[Spotify Playback Provider] Event: authentication_error:', message);
       this.cachedToken = null;
       this.status = 'AUTH_REQUIRED';
-      this.errorMessage = `Authentication failed: ${message}. Connect Spotify to enable audio.`;
+      this.errorMessage = `Authentication failed: ${message}. Connect Spotify to enable playback.`;
       this.logMemberPlaybackLifecycle('authentication_error');
       this.notifyListeners();
     });

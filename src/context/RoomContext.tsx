@@ -255,6 +255,17 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setCurrentUser(msg.user);
           setActiveView('room');
 
+          // Log exact room state received through WebSocket
+          const joinedTrackId = msg.room.currentTrack?.id || msg.room.playerState?.trackId || 'none';
+          const joinedTrackUri = joinedTrackId !== 'none' ? `spotify:track:${joinedTrackId.replace(/^spotify-/, '')}` : 'none';
+          const joinedPaused = !(msg.room.playerState?.isPlaying);
+          const joinedPosMs = Math.round((msg.room.playerState?.position || 0) * 1000);
+          const joinedTs = msg.room.playerState?.serverTimestamp || Date.now();
+          const joinedQueueVer = msg.room.queueVersion || 1;
+          console.log(
+            `[ROOM_STATE_RECEIVED] trackId=${joinedTrackId} trackUri=${joinedTrackUri} paused=${joinedPaused} positionMs=${joinedPosMs} timestamp=${joinedTs} queueVersion=${joinedQueueVer}`
+          );
+
           // Trace member playback lifecycle and verify Spotify session
           spotifyPlaybackProvider.logMemberPlaybackLifecycle('ROOM_JOINED');
           spotifyPlaybackProvider.initialize().catch((err) => {
@@ -293,6 +304,17 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setCurrentUser(msg.user);
           setActiveView('room');
           setIsLoading(false);
+
+          // Log exact room state received through WebSocket
+          const stateTrackId = msg.room.currentTrack?.id || msg.room.playerState?.trackId || 'none';
+          const stateTrackUri = stateTrackId !== 'none' ? `spotify:track:${stateTrackId.replace(/^spotify-/, '')}` : 'none';
+          const statePaused = !(msg.room.playerState?.isPlaying);
+          const statePosMs = Math.round((msg.room.playerState?.position || 0) * 1000);
+          const stateTs = msg.room.playerState?.serverTimestamp || Date.now();
+          const stateQueueVer = msg.room.queueVersion || 1;
+          console.log(
+            `[ROOM_STATE_RECEIVED] trackId=${stateTrackId} trackUri=${stateTrackUri} paused=${statePaused} positionMs=${statePosMs} timestamp=${stateTs} queueVersion=${stateQueueVer}`
+          );
 
           // Trace member playback lifecycle and verify Spotify session
           spotifyPlaybackProvider.logMemberPlaybackLifecycle('ROOM_STATE');
@@ -375,6 +397,17 @@ export const RoomProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } else {
             break;
           }
+
+          // Log playback state received through WebSocket
+          const pbTrackId = state.trackId || currentRoomRef.current?.currentTrack?.id || 'none';
+          const pbTrackUri = pbTrackId !== 'none' ? `spotify:track:${pbTrackId.replace(/^spotify-/, '')}` : 'none';
+          const pbPaused = !state.isPlaying;
+          const pbPosMs = Math.round((state.position || 0) * 1000);
+          const pbTs = state.serverTimestamp || Date.now();
+          const pbQueueVer = currentRoomRef.current?.queueVersion || lastQueueVersionRef.current || state.version || 1;
+          console.log(
+            `[ROOM_STATE_RECEIVED] trackId=${pbTrackId} trackUri=${pbTrackUri} paused=${pbPaused} positionMs=${pbPosMs} timestamp=${pbTs} queueVersion=${pbQueueVer}`
+          );
 
           syncEngine.handlePlaybackState(state);
 
